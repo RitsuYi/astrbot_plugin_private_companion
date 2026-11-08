@@ -29,14 +29,14 @@
 ## 维护者的本地命令示意
 
 这些命令只在独立维护克隆中执行，不在运行中的 AstrBot 插件目录执行。
-`<作者仓库>` 和 `<目标提交或标签>` 必须换成已经核验的实际值。
+`<作者仓库>` 和 `<已核验的目标提交SHA>` 必须换成已经核验的实际值。
 
 ```sh
-git fetch --no-tags <作者仓库> <目标提交或标签>
+git fetch --no-tags <作者仓库> <已核验的目标提交SHA>
 # 用新的独立目录测试，不改变当前 weixin 工作区
 git worktree add --detach ../weixin-update-review weixin
 cd ../weixin-update-review
-git merge --no-commit --no-ff <目标提交或标签>
+git merge --no-commit --no-ff <已核验的目标提交SHA>
 ```
 
 有冲突就停止发布，处理后测试；放弃本次合并可在该测试工作区执行 `git merge --abort`。
