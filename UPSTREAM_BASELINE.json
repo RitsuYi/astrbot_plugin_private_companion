@@ -1,0 +1,13 @@
+{
+  "repository": "RitsuYi/astrbot_plugin_private_companion",
+  "branch": "weixin",
+  "upstream_repository": "menglimi/astrbot_plugin_private_companion",
+  "upstream_base_commit": "05a7689aad72c0de5c84c13b934d32344f21c091",
+  "adapted_version": "7.1.6+weixin.2",
+  "source_archive": "astrbot_plugin_private_companion-7.1.6-weixin-r2.zip",
+  "source_archive_sha256": "c63b14f6031ab2818b7712e7103274b040602764a6999840aa7c83f446e0ce53",
+  "source_snapshot_commit": "d18d3b651df41a3e5cef2643e0691c4cff61f4eb",
+  "merge_strategy": "three-way-snapshot-merge",
+  "automatic_upstream_merge": false,
+  "real_wechat_verification": "requires user environment"
+}
