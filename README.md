@@ -1,12 +1,12 @@
 > 微信维护仓库：[RitsuYi/astrbot_plugin_private_companion](https://github.com/RitsuYi/astrbot_plugin_private_companion)，唯一发布分支 `weixin`。
-> 当前版本 `7.1.6+weixin.2`；升级流程见 [维护方案](MAINTENANCE.md)，来源见 [基线记录](UPSTREAM_BASELINE.json)。
+> 当前版本 `7.1.8+weixin.2`；升级流程见 [维护方案](MAINTENANCE.md)，来源见 [基线记录](UPSTREAM_BASELINE.json)。
 > 原作者为 menglimi，原始说明和署名保留。
 > AstrBot 从 GitHub 安装本微信版时使用 `https://github.com/RitsuYi/astrbot_plugin_private_companion`（默认分支应为 `weixin`）；两个插件分别安装。
 > 安装与真实微信验收见 [微信适配说明](docs/WEIXIN_OC_COMPAT.md)。请勿将接手 bundle、恢复工具包当作插件安装包。
 
 # 我会永远陪着你
 
-> **第三方微信私聊实验适配版：`7.1.6+weixin.2`**。基于上游 `05a7689`，不是作者正式发布。
+> **第三方微信私聊实验适配版：`7.1.8+weixin.2`**。基于作者 7.1.8 发布提交 `7e602da`，不是作者正式发布。
 > 面向 AstrBot 4.29.4 的个人微信 `weixin_oc` 适配器；安装、备份和限制请先读
 > [微信适配安装与验收](docs/WEIXIN_OC_COMPAT.md)。未经过真实微信账号联调。
 
@@ -34,7 +34,7 @@
 | --- | --- |
 | 插件名 | `astrbot_plugin_private_companion` |
 | 显示名 | 我会永远陪着你 |
-| 当前版本 | `7.1.6+weixin.2`（第三方微信私聊实验适配版） |
+| 当前版本 | `7.1.8+weixin.2`（第三方微信私聊实验适配版） |
 | AstrBot 版本 | `>= 4.27.2` |
 | 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`；本实验版新增 `weixin_oc` 私聊 |
 | 管理入口 | AstrBot 插件扩展页「陪伴小屋」（支持低配设备开启「性能模式」切换为轻量状态页） |

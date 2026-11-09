@@ -3,9 +3,9 @@
 ## 已核验的来源
 
 - 维护仓库：[RitsuYi/astrbot_plugin_private_companion](https://github.com/RitsuYi/astrbot_plugin_private_companion)，唯一发布分支 `weixin`。
-- 当前版本：`7.1.6+weixin.2`，原作者为 [menglimi](https://github.com/menglimi)。
+- 当前版本：`7.1.8+weixin.2`，原作者为 [menglimi](https://github.com/menglimi)。
 - 作者仓库：[原始来源](https://github.com/menglimi/astrbot_plugin_private_companion)。
-- 本次锁定作者基线：`05a7689aad72c0de5c84c13b934d32344f21c091`；接手提交：`e7d6029ae72e813cf84a8c3c279ba46ec506a8c5`。
+- 本次锁定作者基线：`7e602dac2d8f9c310bf0e23de55d9c93f029aad1`；接手提交：`e7d6029ae72e813cf84a8c3c279ba46ec506a8c5`。
 - `UPSTREAM_BASELINE.json` 记录原始交付 ZIP、接手 ZIP、bundle 的校验值及来源提交。
   原始插件 ZIP 未在本次本机重新取得，其校验值来自已核验的接手清单。
 
@@ -82,3 +82,7 @@ Git 数据、bundle、维护/恢复工具、CMD、开发虚拟环境、真实配
 
 维护由用户发起；本次不创建定时任务、自动合并或无人值守发布。
 禁止批量删除文件或目录。需要删除时只能逐次操作一个明确路径的文件；需要批量删除则停止并请用户手动处理。
+
+## 2026-11-09 的 7.1.8 升级
+
+目标 `7e602dac2d8f9c310bf0e23de55d9c93f029aad1`；从 `7.1.6+weixin.2` 普通三方合并为 `7.1.8+weixin.2`。旧接手验证仅证明旧 R2；本次验证见仓库外安装包交付目录中的 validation.json。本次仅交付安装 ZIP，不推进远端发布分支、不更改运行中的 AstrBot。

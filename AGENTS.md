@@ -2,9 +2,9 @@
 
 ## 范围与分支
 
-本仓库为 `RitsuYi/astrbot_plugin_private_companion` 的微信适配版 `7.1.6+weixin.2`。唯一发布分支 `weixin`。
+本仓库为 `RitsuYi/astrbot_plugin_private_companion` 的微信适配版 `7.1.8+weixin.2`。唯一发布分支 `weixin`。
 `origin=https://github.com/RitsuYi/astrbot_plugin_private_companion.git`；`upstream=https://github.com/menglimi/astrbot_plugin_private_companion.git`。
-当前锁定作者基线 `05a7689aad72c0de5c84c13b934d32344f21c091`。来源及包哈希见 `UPSTREAM_BASELINE.json`，完整流程见 `MAINTENANCE.md`。
+当前锁定作者基线 `7e602dac2d8f9c310bf0e23de55d9c93f029aad1`。来源及包哈希见 `UPSTREAM_BASELINE.json`，完整流程见 `MAINTENANCE.md`。
 先检查工作区、Git 状态和实际远端，保留用户文件与提交。不得创建作者原版 main 发布分支、强推、重建仓库，
 或将作者最新代码直接覆盖当前微信版。只有用户提出新版本更新时才获取并合并对应目标，不引入未交付的 R3。
 
@@ -20,8 +20,8 @@ Python/JSON 语法可在仓库根目录使用只读检查（不产生 `__pycache
 ```powershell
 python -B -X utf8 -c "import ast,pathlib; paths=list(pathlib.Path('.').rglob('*.py')); [ast.parse(p.read_bytes(),filename=str(p)) for p in paths if '.git' not in p.parts]"
 python -B -X utf8 -c "import json,pathlib; [json.loads(p.read_bytes()) for p in pathlib.Path('.').rglob('*.json') if '.git' not in p.parts]"
-git merge-base --is-ancestor 05a7689aad72c0de5c84c13b934d32344f21c091 HEAD
-git merge-base HEAD 05a7689aad72c0de5c84c13b934d32344f21c091
+git merge-base --is-ancestor 7e602dac2d8f9c310bf0e23de55d9c93f029aad1 HEAD
+git merge-base HEAD 7e602dac2d8f9c310bf0e23de55d9c93f029aad1
 git diff --check
 ```
 

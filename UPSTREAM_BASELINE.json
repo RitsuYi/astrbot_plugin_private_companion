@@ -2,11 +2,8 @@
   "repository": "RitsuYi/astrbot_plugin_private_companion",
   "branch": "weixin",
   "upstream_repository": "menglimi/astrbot_plugin_private_companion",
-  "upstream_base_commit": "05a7689aad72c0de5c84c13b934d32344f21c091",
-  "adapted_version": "7.1.6+weixin.2",
-  "source_archive": "astrbot_plugin_private_companion-7.1.6-weixin-r2.zip",
-  "source_archive_sha256": "c63b14f6031ab2818b7712e7103274b040602764a6999840aa7c83f446e0ce53",
-  "source_snapshot_commit": "d18d3b651df41a3e5cef2643e0691c4cff61f4eb",
+  "upstream_base_commit": "7e602dac2d8f9c310bf0e23de55d9c93f029aad1",
+  "adapted_version": "7.1.8+weixin.2",
   "merge_strategy": "git-merge-with-shared-upstream-baseline",
   "automatic_upstream_merge": false,
   "real_wechat_verification": "未实测；SDK/模拟测试不能代替真实微信登录、收发与双插件联调。",
@@ -21,5 +18,21 @@
     "original_origin_commit": "ac5cbcc056fdd597fd16148068d481e99dee06ff",
     "verified_on": "2026-11-09"
   },
-  "source_archive_verification": "SHA256 recorded from the verified handoff manifest; original plugin ZIP is not present locally."
+  "previous_release": {
+    "source_archive": "astrbot_plugin_private_companion-7.1.6-weixin-r2.zip",
+    "source_archive_sha256": "c63b14f6031ab2818b7712e7103274b040602764a6999840aa7c83f446e0ce53",
+    "source_snapshot_commit": "d18d3b651df41a3e5cef2643e0691c4cff61f4eb",
+    "source_archive_verification": "SHA256 recorded from the verified handoff manifest; original plugin ZIP is not present locally.",
+    "adapted_version": "7.1.6+weixin.2",
+    "upstream_base_commit": "05a7689aad72c0de5c84c13b934d32344f21c091"
+  },
+  "upgrade": {
+    "from_version": "7.1.6+weixin.2",
+    "target_version": "7.1.8",
+    "target_commit": "7e602dac2d8f9c310bf0e23de55d9c93f029aad1",
+    "method": "normal-three-way-merge",
+    "excludes_7_1_9": true,
+    "release_artifact_hash_location": "external release-manifest.json",
+    "real_wechat_tested": false
+  }
 }
