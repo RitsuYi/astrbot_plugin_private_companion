@@ -8,7 +8,7 @@
 
 > **第三方微信私聊实验适配版：`7.1.8+weixin.2`**。基于作者 7.1.8 发布提交 `7e602da`，不是作者正式发布。
 > 面向 AstrBot 4.29.4 的个人微信 `weixin_oc` 适配器；安装、备份和限制请先读
-> [微信适配安装与验收](docs/WEIXIN_OC_COMPAT.md)。未经过真实微信账号联调。
+> [微信适配安装与验收](docs/WEIXIN_OC_COMPAT.md)。用户于 2026-11-09 反馈安装后已验证可用；验证范围与已知限制见 [7.1.8 微信版验证记录](docs/WEIXIN_OC_7_1_8_VALIDATION.md)。
 
 <div align="center">
   <img src="./logo.png" alt="我会永远陪着你" width="180">
