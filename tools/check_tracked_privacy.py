@@ -11,7 +11,7 @@ from tools.build_v2_release import SECRET_PATTERNS
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_DIRS = {"data", "plugin_data", "logs", "backups", "dist", "build", "verification"}
-PRIVATE_FILES = {"agents.md", "cmd_config.json", "credentials.json", "secrets.json"}
+PRIVATE_FILES = {"cmd_config.json", "credentials.json", "secrets.json"}
 PRIVATE_SUFFIXES = {
     ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".p12", ".pfx",
     ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".xz", ".bz2",
@@ -28,6 +28,8 @@ def is_private_path(relative: str) -> bool:
         parts[:2] == ("docs", "design-preview")
         or any(part in PRIVATE_DIRS for part in parts[:-1])
         or name in PRIVATE_FILES
+        # Only the reviewed, public repository-root maintenance instructions belong in Git.
+        or (name == "agents.md" and relative != "AGENTS.md")
         or name == ".env"
         or name.startswith(".env.")
         or path.suffix.lower() in PRIVATE_SUFFIXES

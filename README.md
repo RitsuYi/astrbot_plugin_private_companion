@@ -1,6 +1,8 @@
-> 微信维护仓库：RitsuYi/astrbot_plugin_private_companion，唯一分支 `weixin`。
+> 微信维护仓库：[RitsuYi/astrbot_plugin_private_companion](https://github.com/RitsuYi/astrbot_plugin_private_companion)，唯一发布分支 `weixin`。
 > 当前版本 `7.1.6+weixin.2`；升级流程见 [维护方案](MAINTENANCE.md)，来源见 [基线记录](UPSTREAM_BASELINE.json)。
 > 原作者为 menglimi，原始说明和署名保留。
+> AstrBot 从 GitHub 安装本微信版时使用 `https://github.com/RitsuYi/astrbot_plugin_private_companion`（默认分支应为 `weixin`）；两个插件分别安装。
+> 安装与真实微信验收见 [微信适配说明](docs/WEIXIN_OC_COMPAT.md)。请勿将接手 bundle、恢复工具包当作插件安装包。
 
 # 我会永远陪着你
 

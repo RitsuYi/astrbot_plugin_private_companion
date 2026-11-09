@@ -11,13 +11,13 @@ class ReleaseSecretDetectionTests(unittest.TestCase):
     def test_git_inventory_rejects_runtime_and_host_config(self):
         for name in (
             "data/cmd_config.json", "plugin_data/companion-7/state.db",
-            "AGENTS.md", ".env.local", "astrbot_plugin_private_companion_config.json",
+            "docs/private/AGENTS.md", ".env.local", "astrbot_plugin_private_companion_config.json",
             "docs/private.zip", "DATA/CMD_CONFIG.JSON", "docs/private.tar.gz",
             "docs/design-preview/index.html",
         ):
             with self.subTest(path=name):
                 self.assertTrue(is_private_path(name))
-        for name in ("_conf_schema.json", "fixtures/astrbot_staging.example.json"):
+        for name in ("AGENTS.md", "_conf_schema.json", "fixtures/astrbot_staging.example.json"):
             with self.subTest(path=name):
                 self.assertFalse(is_private_path(name))
 
