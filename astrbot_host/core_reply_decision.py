@@ -101,7 +101,10 @@ def core_decision_facts(event, prepared, application, *, at):
     account = str(getattr(scope, "account_id", "") or "")
     sender = str(getattr(getattr(native, "principal", None), "native_account_id", "") or "")
     text = str(prepared.get("text", getattr(native, "text", getattr(event, "message_str", ""))) or "")
-    trigger = group_trigger_facts(event, account)
+    text = getattr(native, "group_message_text", None) or text
+    trigger = prepared.get("group_trigger")
+    if trigger is None:
+        trigger = group_trigger_facts(event, account)
     kinds = {getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
              for part in getattr(event.message_obj, "message", ())}
     has_image = bool(trigger["has_image"] or getattr(native, "images", ()))
@@ -184,6 +187,26 @@ async def prepare_core_reply_decision(event, prepared, *, application, now=None)
             prepared.get("event_ref"), prepared.get("turn_id"), result["elapsed_ms"],
         )
         return result
+    # A direct @ is an explicit invitation to speak.  Laya may classify the
+    # text as "silent" (for example when the mention contains an image or a
+    # short request), but that classification must not override the caller's
+    # explicit wake-up.  Keep the decision record for diagnostics and skip the
+    # extra inference entirely.
+    if prepared.get("channel") == "group":
+        admission = prepared.get("group_admission") or {}
+        if admission.get("mentioned") is True:
+            result = {
+                "status": "skipped", "reason": "explicit_mention",
+                "applied_decision": {"action": "reply"}, "suppress_reply": False,
+                "elapsed_ms": round((perf_counter() - started) * 1000),
+            }
+            prepared["laya_decision"] = result
+            logger.info(
+                "[CompanionV2] Laya 核心接话判断 event_ref=%s turn_id=%s channel=group "
+                "status=skipped action=reply reason=explicit_mention elapsed_ms=%s",
+                prepared.get("event_ref"), prepared.get("turn_id"), result["elapsed_ms"],
+            )
+            return result
     resolver = getattr(application, "laya_decision_resolver", None)
     service = None
     result = {"status": "skipped", "reason": "laya_resolver_unavailable"}

@@ -92,8 +92,15 @@ def core_image_tools(session, offered):
                 filtered = [item for item in filtered if item.get("action") in IMAGE_ACTIONS]
             except Exception:
                 filtered = []
-        logger.info("[CompanionV2][image] stage=catalog offered=%s image_actions=0 filtered=%s",
-                    len(offered), filtered[:4])
+        denial = None
+        try:
+            values = effective_settings(session.application.runtime, session.context)
+            denial = image_request_denial(session.application.runtime, session.context, values)
+        except Exception:
+            denial = None
+        logger.info("[CompanionV2][image] stage=catalog offered=%s image_actions=0 filtered=%s denial=%s scope=%s",
+                    len(offered), filtered[:4], denial[0] if denial else "",
+                    getattr(getattr(session.context, "scope", None), "kind", None))
         return offered, None
     try:
         values = effective_settings(session.application.runtime, session.context)
@@ -281,5 +288,5 @@ def inject_core_image_prompt(session, request, offered, values):
                     if route_guidance:
                         instruction += "\n" + route_guidance
             except Exception as error:
-                logger.warning("[CompanionV2] 核心生图参考资料暂不可用 error_type=%s", type(error).__name__)
+                logger.warning("[CompanionV2] 核心生图参考资料暂不可用 error_type=%s code=%s", type(error).__name__, getattr(error, "code", "unknown"))
     set_system_instruction(request, "image_output", instruction)

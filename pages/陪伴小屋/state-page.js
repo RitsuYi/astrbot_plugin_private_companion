@@ -50,10 +50,17 @@ window.CompanionStatePage = (() => {
     stateByScope.set(stateScopeKey, {...data, loading:false, error:false, notice:""});
   }
 
-  function blank() { return {catalog:null,target:0,role:0,status:null,cursor:"",loading:false,error:false,notice:"",ready:false,
+  function blank() { return {catalog:null,target:-1,role:-1,windowSelected:false,status:null,cursor:"",loading:false,error:false,notice:"",ready:false,
     pendingMaintenance:null,maintenanceSubmitting:false}; }
   function target() { return data?.catalog?.targets[data.target]; }
   function role() { return target()?.roles[data.role]; }
+  function visibleStatus(result) {
+    if(data.windowSelected)return result;
+    const settings={...result.settings},effective={...result.effective},diagnostics={...result.presentation_diagnostics};
+    delete settings.typing_enabled;delete settings.typing_refresh_seconds;delete effective.typing_enabled;delete diagnostics.typing;
+    return {...result,settings,effective,presentation_diagnostics:diagnostics,edit_token:null,contact:null,
+      presentation:Object.fromEntries(Object.entries(result.presentation||{}).filter(([key])=>!key.startsWith("typing:")))};
+  }
   function personaLabel() { return window.CompanionProduct?.roleLabel?.(role()) || "当前角色"; }
   /* 同 memory-page.js：桥要插件相对路径，所以切掉插件目录名。 */
   function endpoint() {
@@ -204,8 +211,8 @@ window.CompanionStatePage = (() => {
     const basis=value=>({calendar_plan:"当前日程的公开文案",role_simulation:"角色模拟的公开文案"})[value]||"公开文案";
     /* 在线模式的四个档位与适配层的映射一致（delivery 侧 status 10/30/50/40）。 */
     const onlineMode=value=>({online:"在线",away:"离开",busy:"忙碌",invisible:"隐身"})[value]||value;
-    const configuration=`<dl class="state-presentation-settings"><div><dt>正在输入 · ${e(configured("typing_enabled"))}</dt>
-      <dd>${e(activity(typing,"typing"))}</dd><dd class="state-presentation-note">配置刷新间隔：${e(typing?.refresh_seconds??settings.typing_refresh_seconds??"未提供")} 秒</dd></div>
+    const configuration=`<dl class="state-presentation-settings">${data.windowSelected?`<div><dt>正在输入 · ${e(configured("typing_enabled"))}</dt>
+      <dd>${e(activity(typing,"typing"))}</dd><dd class="state-presentation-note">配置刷新间隔：${e(typing?.refresh_seconds??settings.typing_refresh_seconds??"未提供")} 秒</dd></div>`:'<div><dt>正在输入 · 未选择私聊窗口</dt><dd>请选择当前角色的私聊窗口查看和设置。</dd></div>'}
       <div><dt>在线状态 · ${e(configured("online_status_enabled"))}</dt><dd>${e(activity(online,"online"))}</dd>
       ${online?.desired?.mode?`<dd class="state-presentation-note">待展示：${e(onlineMode(online.desired.mode))} · ${e(basis(online.desired.basis))}</dd>`:""}
       <dd class="state-presentation-note">与自定义短状态共用同一路：同一时刻只报一种，在线状态优先；日程里写了公开文案时以日程为准。</dd></div>
@@ -282,7 +289,11 @@ window.CompanionStatePage = (() => {
     if(result?.state==="blocked") {
       const stage=({binding:"等待角色绑定",authorization:"权限检查",settings:"设置检查",schedule_refresh:"计划检查",budget:"预算检查"})[result.stage];
       const detail=CODE.test(code||"")?`（${code}）`:"";
-      return {label:`状态维护预检未通过${stage?` · ${stage}`:""}${detail}`,tone:"is-warning",scheduled:true};
+      const hint=result.stage==="authorization"&&code==="authorization_denied"
+        ?(status.settings?.maintenance_grant_scope==="role"
+          ?"；请在本窗口把后台状态维护关掉再打开并保存"
+          :"；请在本窗口把后台状态维护关掉再打开并保存，或把授权范围改为整个角色"):"";
+      return {label:`状态维护预检未通过${stage?` · ${stage}`:""}${detail}${hint}`,tone:"is-warning",scheduled:true};
     }
     if(result?.state==="deferred")return {
       label:"状态维护等待本地预算"+(result.retry_at?` · ${when(result.retry_at)} 自动检查恢复`:" · 本地限制解除后自动恢复"),
@@ -320,9 +331,9 @@ window.CompanionStatePage = (() => {
         ${dashboardItem("hunger","饥饿",hunger,"utensils","人格共享模拟","tone-hunger")}
         ${dashboardItem("sleep","睡眠",sleep,"moon-star",`${settings.enabled===false||settings.sleep_enabled===false?"状态模拟未运行":"状态模拟已启用"} · ${status.sleep_schedule?.enabled?"自动作息已启用":"自动作息未启用"}`,"tone-sleep")}
         ${dashboardItem("cycle","生理期",phaseLabel(status),"calendar-heart",settings.cycle_enabled?"人格共享模拟":"周期模拟未开启","tone-cycle")}
+        ${dashboardItem("location","位置",valueLabel(values.location,settings.location_enabled!==false),"map-pin","对话中记录的人格位置","tone-location")}
         ${dashboardItem("mood","心情",mood,"smile","心情模拟设置","tone-mood")}
         ${dashboardItem("busy","忙碌",valueLabel(values.busy,settings.busy_enabled!==false),"briefcase-business","日程状态与忙碌处理","tone-busy")}
-        ${dashboardItem("location","位置",valueLabel(values.location,settings.location_enabled!==false),"map-pin","对话中记录的人格位置","tone-location")}
       </div>
       <footer><span class="state-dashboard-status ${maintenance.tone}" role="status"><i aria-hidden="true"></i>${e(maintenance.label)}</span>
         <span>${maintenance.scheduled&&status.maintenance?.enabled!==false&&status.maintenance?.next_at?`下次更新 ${e(when(status.maintenance.next_at))}`:""}</span></footer>
@@ -379,13 +390,14 @@ window.CompanionStatePage = (() => {
     } else if(feature==="presentation") {
       const diag=status.presentation_diagnostics,enabled=[settings.typing_enabled,settings.presence_enabled].filter(Boolean).length;
       const channel=(name,value)=>{
+        if(name==="typing_enabled"&&!data.windowSelected)return "未选择私聊窗口";
         if(!settings[name])return "开关已关闭";
         if(!status.effective?.[name]?.allowed)return `已开启 · ${presentationReasons[status.effective?.[name]?.reason]||"授权待核对"}`;
         if(!value)return "已开启 · 授权通过";
         const label=({idle:"已开启 · 当前空闲",waiting:"已开启 · 等待任务",refreshing:"已开启 · 刷新中",suppressed:"本轮已停止刷新",recorded:"相同文案已有请求记录",deduplicated:"账号已有相同文案记录",blocked:"当前条件未满足",paused:"已暂停",unavailable:"展示端口不可用"})[value.state]||"运行状态待确认";
         return [label,value.reason?presentationReasons[value.reason]||reason(value.reason):null].filter(Boolean).join(" · ");
       };
-      body=overviewMarkup(feature,"展示通道",`${enabled} 项开关已开启`,"受理确认只说明请求被平台接受，不代表客户端当前展示状态。",[["正在输入",channel("typing_enabled",diag?.typing)],["自定义短状态",channel("presence_enabled",diag?.custom_status)],["输入提示刷新间隔",`${settings.typing_refresh_seconds??"未提供"} 秒（取值 1–10）`],["诊断时间",diag?.observed_at?when(diag.observed_at):"尚无诊断记录"]])+(editor?.markup({feature,details:presentationMarkup(status,{receiptsOnly:true})})||"");
+      body=overviewMarkup(feature,"展示通道",`${enabled} 项开关已开启`,"受理确认只说明请求被平台接受，不代表客户端当前展示状态。",[["正在输入",channel("typing_enabled",diag?.typing)],["自定义短状态",channel("presence_enabled",diag?.custom_status)],["输入提示刷新间隔",data.windowSelected?`${settings.typing_refresh_seconds??"未提供"} 秒（取值 1–10）`:"未选择私聊窗口"],["诊断时间",diag?.observed_at?when(diag.observed_at):"尚无诊断记录"]])+(editor?.markup({feature,details:presentationMarkup(status,{receiptsOnly:true})})||"");
     } else body=workspaceOverview(status,feature)+(editor?.markup({feature})||"");
     const scopePill=featureScopes[feature]||"当前角色";
     const subtitle=featureSubtitles[feature]||"";
@@ -465,7 +477,7 @@ window.CompanionStatePage = (() => {
   function render() {
     if (!root?.isConnected || !data) return;
     const status=data.status,roleTarget=target(),contactView=section==="contact",weatherView=section==="weather",patrolView=section==="patrol";
-    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint()});
+    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint(),window_selected:data.windowSelected});
     else editor?.invalidate();
     editor?.setStatus(status,data.loading);
     if(!contactView&&editor?.requiredFeature) {
@@ -480,6 +492,7 @@ window.CompanionStatePage = (() => {
     const available=!!role()?.state_api;
     let content;
     if (!data.ready) content=`<div class="panel state-empty">${data.loading?"正在读取授权目标…":"刷新目标后即可查看角色状态。"}</div>`;
+    else if(contactView&&!data.windowSelected)content='<div class="panel state-empty">请先选择当前角色的私聊窗口，再查看联系安排。</div>';
     else if (!available) content=`<div class="panel state-empty"><h3>当前角色尚未绑定状态工作区</h3><p>请在账号与会话中核对 Bot 账号和人格映射。</p></div>`;
     else if (!status) content=`<div class="panel state-empty">${data.loading?"正在读取状态…":"尚未读取状态。"}</div>`;
     else if(contactView)content=editor?.markup({section:"contact"})||"";
@@ -493,7 +506,7 @@ window.CompanionStatePage = (() => {
         ${activeFeature?featurePanelMarkup(status):""}${temporary}`;
     }
     const selectedScope=window.CompanionProduct?.selection?.();
-    const accessScope=roleTarget ? (window.CompanionProduct?.targetLabel?.(roleTarget) || (roleTarget.scope_kind === "group" ? "当前群聊" : "当前私聊窗口")) : "尚未选择真实会话";
+    const accessScope=data.windowSelected&&roleTarget ? (window.CompanionProduct?.targetLabel?.(roleTarget) || "当前私聊窗口") : "未选择私聊窗口";
     const scopeMarkup=contactView?`<div class="panel memory-scope state-scope"><div class="state-scope-current"><span>当前会话</span><strong>${e(accessScope)}</strong><small>联系安排适用于当前会话。</small></div>${!selectedScope?`<button type="button" class="button small" data-go="manage" data-manage="host">去账号与会话选择</button>`:""}</div>`
       :"";
     if(oldDialog?.open)oldDialog.close();
@@ -503,7 +516,11 @@ window.CompanionStatePage = (() => {
       :maintenanceOff?"前往设置":"立即更新";
     const maintainIcon=maintenanceOff?"settings-2":"sparkles";
     const noticeText=data.notice||(maintenanceOff?"状态维护已关闭，启用后才会生成新的状态记录。":"");
-    root.innerHTML=`<div class="state-page-heading"><div><span class="state-badge">${contactView?"联系安排":weatherView?"天气感知":patrolView?"维护设置":"角色状态"}</span></div><div class="state-page-actions">${section==="state"?`<button type="button" class="memory-button state-maintain-button" id="state-maintain" ${maintainDisabled?"disabled":""} ${maintenanceOff?`title="在状态设置中启用后台状态维护"`:""}><i data-lucide="${maintainIcon}" aria-hidden="true"></i><span>${maintainLabel}</span></button>`:""}<button type="button" class="memory-button" id="state-refresh" title="重新读取当前状态" ${data.loading||editor?.busy?"disabled":""}>${contactView?"刷新联系设置":weatherView?"刷新天气设置":patrolView?"刷新巡视设置":"刷新状态"}</button></div></div>
+    const pageHint=contactView?"设置当前会话的联系频率与打扰边界。"
+      :weatherView?"设置天气来源与时效，日程会参考所在地实况。"
+      :patrolView?"设置每日巡视的时刻与保留时长。"
+      :"点按任意状态查看设置；下方入口可调整 QQ 展示、日程、天气与时间。";
+    root.innerHTML=`<div class="state-page-heading"><div><span class="state-badge">${contactView?"联系安排":weatherView?"天气感知":patrolView?"维护设置":"角色状态"}</span><p class="state-page-hint">${e(pageHint)}</p></div><div class="state-page-actions">${section==="state"?`<button type="button" class="memory-button state-maintain-button" id="state-maintain" ${maintainDisabled?"disabled":""} ${maintenanceOff?`title="在状态设置中启用后台状态维护"`:""}><i data-lucide="${maintainIcon}" aria-hidden="true"></i><span>${maintainLabel}</span></button>`:""}<button type="button" class="memory-button" id="state-refresh" title="重新读取当前状态" ${data.loading||editor?.busy?"disabled":""}>${contactView?"刷新联系设置":weatherView?"刷新天气设置":patrolView?"刷新巡视设置":"刷新状态"}</button></div></div>
       ${scopeMarkup}<div class="memory-notice ${data.error?"error":""}" id="state-notice" role="status" aria-live="polite" ${noticeText?"":"hidden"}>${e(noticeText)}</div>${content}${settingsOpen?homeSettingsMarkup():""}`;
     root.querySelectorAll(".state-receipt-reference").forEach(item=>{item.open=expanded.has(item.dataset.receipt);});
     const settingsDialog=root.querySelector("#state-home-settings");
@@ -542,7 +559,7 @@ window.CompanionStatePage = (() => {
     const ticket=++version; stopTimer();
     const cached=stateByScope.get(stateScopeKey), fresh=blank();
     if(cached){fresh.catalog=cached.catalog;fresh.target=cached.target;fresh.role=cached.role;fresh.status=cached.status;fresh.cursor=cached.cursor;
-      fresh.pendingMaintenance=cached.pendingMaintenance;fresh.ready=!!cached.catalog;}
+      fresh.windowSelected=cached.windowSelected;fresh.pendingMaintenance=cached.pendingMaintenance;fresh.ready=!!cached.catalog;}
     data=fresh; data.loading=true; render();
     try {
       const catalog=window.CompanionProduct?.directory?.() || await api("GET","page/targets");
@@ -552,10 +569,15 @@ window.CompanionStatePage = (() => {
       const product=window.CompanionProduct;
       const selected=product?.selection();
       const owner=product?.roleTarget?.();
-      const targetIndex=catalog.targets.findIndex(item=>item.target_id===(owner?.target_id||selected?.target_id));
+      const selectedTarget=catalog.targets.find(item=>item.target_id===selected?.target_id&&item.bot_id===selected?.bot_id
+        &&item.scope_kind==="private"&&item.roles.some(item=>item.role_id===selected?.role_id));
+      data.windowSelected=!!selectedTarget;
+      const targetId=selectedTarget?.target_id||(section!=="contact"?owner?.target_id:null);
+      const targetIndex=catalog.targets.findIndex(item=>item.target_id===targetId&&item.bot_id===selected?.bot_id);
       const roleIndex=targetIndex>=0?catalog.targets[targetIndex].roles.findIndex(item=>item.role_id===selected?.role_id):-1;
-      if(targetIndex>=0&&roleIndex>=0){data.target=targetIndex;data.role=roleIndex;}
-      if(targetIndex>=0&&roleIndex>=0&&role()?.state_api){endpoint();await load();}else {data.notice="当前角色尚未绑定状态工作区，请核对账号与人格映射。";render();}
+      data.target=targetIndex;data.role=roleIndex;data.status=null;
+      if(targetIndex>=0&&roleIndex>=0&&role()?.state_api){endpoint();await load();}
+      else {data.notice=section==="contact"&&!data.windowSelected?"":"当前角色尚未绑定状态工作区，请核对账号与人格映射。";render();}
     } catch(error) { if(live(ticket)){failure(error);data.loading=false;render();} }
   }
   async function load(cursor=data?.cursor||"") {
@@ -565,7 +587,7 @@ window.CompanionStatePage = (() => {
       const result=await api("GET",endpoint(),{after_id:data.cursor});
       if(!live(ticket))return;
       if(!result.state||!result.settings||!result.sleep_schedule)throw Object.assign(new Error("invalid_response"),{code:"invalid_response"});
-      data.status={...result,request_cursor:data.cursor};
+      data.status=visibleStatus({...result,request_cursor:data.cursor});
       if(data.pendingMaintenance){
         const pending=data.pendingMaintenance,revision=result.state?.revision;
         const currentResult=JSON.stringify(result.maintenance?.result??null);
@@ -582,7 +604,7 @@ window.CompanionStatePage = (() => {
         }else notice("状态更新中…");
       }else notice("");
       stateScopeKey=currentStateScope(); rememberState();
-      return result;
+      return data.status;
     } catch(error) { if(live(ticket))failure(error);return null; }
     finally { if(live(ticket)){data.loading=false;render();schedule();} }
   }
@@ -613,11 +635,13 @@ window.CompanionStatePage = (() => {
       render();schedule();
     }
   }
-  function changeScope(targetIndex,roleIndex) {
+  async function changeScope(targetIndex,roleIndex) {
     if(!data.catalog?.targets[targetIndex]?.roles[roleIndex])return;
+    const selectedTarget=data.catalog.targets[targetIndex],selectedRole=selectedTarget.roles[roleIndex];
+    if(await window.CompanionProduct?.choose(selectedTarget.target_id,selectedRole.role_id,true)===false)return;
+    if(!root?.isConnected)return;
     ++version;stopTimer();const catalog=data.catalog;
-    data={...blank(),catalog,target:targetIndex,role:roleIndex,ready:true};
-    window.CompanionProduct?.choose(catalog.targets[targetIndex].target_id,catalog.targets[targetIndex].roles[roleIndex].role_id,true);
+    data={...blank(),catalog,target:targetIndex,role:roleIndex,windowSelected:selectedTarget.scope_kind==="private",ready:true};
     if(role()?.state_api){try{endpoint();load();}catch(error){failure(error);render();}}else render();
   }
   function click(event) {
@@ -678,9 +702,13 @@ window.CompanionStatePage = (() => {
     if(featureButton) {
       if(editor&&!editor.discardIfPristine())return;
       const feature=featureButton.dataset.stateFeature;
-      activeFeature=activeFeature===feature?null:feature;
+      /* A card means "show this feature"; closing is the back/X button.
+         生活日历 mounts 状态页 with feature=planning already open, so the old
+         toggle made the first click on the same card collapse it. */
+      if(activeFeature===feature)return;
+      activeFeature=feature;
       render();schedule();
-      if(activeFeature)root?.querySelector("#state-feature-detail")?.scrollIntoView({
+      root?.querySelector("#state-feature-detail")?.scrollIntoView({
         behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth",block:"nearest"});
       return;
     }
@@ -775,5 +803,6 @@ window.CompanionStatePage = (() => {
   function unmount() { rememberState();++version;stopTimer();root?.querySelector("#state-home-settings")?.close();settingsOpen=false;settingsReturnFeature=settingsReturnFocus=null;editor?.destroy();editor=null;calendarEditor=null;root?.removeEventListener("click",click);root?.removeEventListener("keydown",keydown);root?.removeEventListener("change",change);root?.removeEventListener("input",input);root?.removeEventListener("submit",submit);root=null;data=null;bridge=null;activeFeature=null;stateScopeKey="";syncSettingsButton();setChrome(false); }
   document.addEventListener("visibilitychange",()=>{if(!data?.ready)return;if(document.hidden)stopTimer();else if(!data.loading&&!editor?.interacting)load();});
   window.addEventListener?.("beforeunload",event=>{if(editor?.dirty){event.preventDefault();event.returnValue="";}});
-  return {mount,unmount,openSettings,openEditor,openFeature,canLeave:()=>editor?.discardIfPristine()??true};
+  return {mount,unmount,openSettings,openEditor,openFeature,currentFeature:()=>activeFeature,
+    canLeave:()=>editor?.discardIfPristine()??true};
 })();

@@ -8,6 +8,8 @@ window.CompanionOutputPage=(()=>{
     model_image_output_conflict:"配置已在其他页面更新，请重新读取后核对。",
     model_image_output_busy:"正在执行生图任务，请等待当前任务结束后保存。",
     model_image_output_invalid:"配置未保存，请核对地址、端点和数值。",
+    model_image_output_unconfigured:"还没有可用的生图模型：先添加并启用一个在线模型，或配置本地后端，再打开总开关。",
+    model_image_output_store_failed:"配置写不回插件数据目录，请检查目录权限或占用后重试。",
     model_image_output_failed:"操作未完成，请重新读取状态。",
     staging_not_initialized:"V2 执行器尚未初始化，请先加载陪伴小屋配置。",
     staging_session_still_stopping:"V2 当前会话仍在停止，请稍等片刻后再重连。",
@@ -34,9 +36,10 @@ window.CompanionOutputPage=(()=>{
     nai_generation_interrupted:"NAI 调用已中断，结果未知，未重复生成",
     nai_output_unavailable:"NAI 返回的图片暂不可读取"};
   let root=null,abort=null,ticket=0,scope="",base=null,draft=null,revision="",busy="",notice="",bad=false,hostRegistered=false,expanded=new Set(),tests=new Map(),testKeys=new Map(),observation=null,observationBusy=false,observationError="",sceneEditorOpen=false,sceneDraft=null,sceneError="",sceneSaving=false;
-  let albumItems=[],albumCursor=null,albumLoaded=false,albumLoading=false,albumError="",albumSelected=-1,albumSelectedIds=new Set(),albumNotice="",albumBusy="";
+  let albumSources=[],albumItems=[],albumCursor=null,albumLoaded=false,albumLoading=false,albumError="",albumSelected=-1,albumSelectedIds=new Set(),albumNotice="",albumBusy="";
   let albumReferenceOpen=false,albumReferenceImageId="",albumReferenceLabel="",albumReferenceRoles=new Set(["identity"]),albumReferenceError="";
   let naiStatus=null;
+  let works=[],worksLoaded=false,worksBusy=false,workTicket=0,workSelection=null;
   const product=()=>window.CompanionProduct;
   const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const endpointLabel=item=>String(item?.name||"").trim()||String(item?.model||"").trim()||"未命名模型";
@@ -51,7 +54,39 @@ window.CompanionOutputPage=(()=>{
     if(typeof endpoint!=="string"||!endpoint)throw Object.assign(new Error("当前角色尚无可读取的图片相册"),{code:"image_material_unavailable"});
     return product().relative(endpoint)+"/album";
   };
-  const referenceEndpoint=()=>albumEndpoint().replace(/\/album$/,"")+"/references";
+  // The cottage selects a role, while album ownership stays with each account.
+  // Read only routes advertised for this role by the existing target directory.
+  function roleAlbumSources(){
+    const current=product()?.role?.(),seen=new Set(),sources=[];
+    const targets=product()?.targets?.()||[];
+    for(const target of targets){
+      if(target.scope_kind!=="private")continue;
+      for(const persona of target.roles||[]){
+        if(!current?.role_id||persona.role_id!==current.role_id||!persona.image_material_api)continue;
+        const endpoint=product().relative(persona.image_material_api)+"/album";
+        // A concrete window and its setup template expose the same account album.
+        const key=target.platform_id&&target.account_id&&target.bot_id
+          ?JSON.stringify([target.platform_id,target.account_id,target.bot_id]):endpoint;
+        if(seen.has(key))continue;
+        seen.add(key);sources.push({endpoint,cursor:null,done:false});
+      }
+    }
+    return sources.length?sources:[{endpoint:albumEndpoint(),cursor:null,done:false}];
+  }
+  function imageAlbumEndpoint(imageId){
+    const item=albumItems.find(item=>item.image_id===imageId);
+    if(!item?._albumEndpoint)throw new Error("图片所属账号尚未确认，请刷新图库");
+    return item._albumEndpoint;
+  }
+  function selectedAlbumGroups(){
+    const groups=new Map();
+    for(const imageId of albumSelectedIds){
+      const endpoint=imageAlbumEndpoint(imageId);
+      if(!groups.has(endpoint))groups.set(endpoint,[]);
+      groups.get(endpoint).push(imageId);
+    }
+    return groups;
+  }
   const options=(values,current)=>Object.entries(values).map(([key,label])=>`<option value="${esc(key)}"${key===current?" selected":""}>${esc(label)}</option>`).join("");
   function updateMarkup(node,html){
     if(node.outputMarkup===html)return;
@@ -129,15 +164,39 @@ window.CompanionOutputPage=(()=>{
     if(!append){albumError="";albumNotice="";}
     renderAlbum();
     try{
-      const data=await product().request("GET",albumEndpoint(),append?{cursor:albumCursor}:undefined);
+      const sources=append?albumSources:roleAlbumSources();
+      const pending=sources.filter(source=>!source.done);
+      const results=await Promise.allSettled(pending.map(async source=>{
+        const data=await product().request("GET",source.endpoint,source.cursor?{cursor:source.cursor}:undefined);
+        if(!Array.isArray(data?.items))throw new Error("产出图库返回格式不完整");
+        if(data.next_cursor&&data.next_cursor===source.cursor)throw new Error("产出图库分页未前进，请刷新图库");
+        return data;
+      }));
       if(!live(id))return;
-      if(!Array.isArray(data?.items))throw new Error("产出图库返回格式不完整");
-      const incoming=data.items.filter(item=>item&&item.image_id&&item.thumbnail);
-      if(append){const known=new Set(albumItems.map(item=>item.image_id));albumItems.push(...incoming.filter(item=>!known.has(item.image_id)));}
-      else{albumItems=incoming;albumSelectedIds=new Set([...albumSelectedIds].filter(id=>albumItems.some(item=>item.image_id===id)));updatePreviewFromAlbum();}
-      albumCursor=typeof data.next_cursor==="string"&&data.next_cursor?data.next_cursor:null;
-      albumLoaded=true;albumError="";
-      if(albumSelected>=albumItems.length)albumSelected=-1;
+      let items=append?[...albumItems]:[],errors=[];
+      results.forEach((result,index)=>{
+        const source=pending[index];
+        if(result.status==="rejected"){
+          const error=result.reason;
+          errors.push(ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"产出图库暂不可读");
+          return;
+        }
+        const data=result.value;
+        items.push(...data.items.filter(item=>item&&item.image_id&&item.thumbnail)
+          .map(item=>({...item,_albumEndpoint:source.endpoint})));
+        source.cursor=typeof data.next_cursor==="string"&&data.next_cursor?data.next_cursor:null;
+        source.done=!source.cursor;
+      });
+      albumSources=sources;
+      // The same account may have multiple native windows; never show duplicates.
+      const known=new Set();
+      albumItems=items.filter(item=>{if(known.has(item.image_id))return false;known.add(item.image_id);return true;})
+        .sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||""))||String(a.image_id).localeCompare(String(b.image_id)));
+      albumSelectedIds=new Set([...albumSelectedIds].filter(imageId=>known.has(imageId)));
+      albumSelected=-1;updatePreviewFromAlbum();
+      albumCursor=sources.some(source=>!source.done);
+      albumLoaded=true;albumError=errors.join("；");
+      albumNotice=errors.length?`部分账号图库尚未读取（${errors.length}）：${albumError}；可读取更早的产出重试。`:"";
     }catch(error){
       if(!live(id))return;
       albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"产出图库暂不可读";
@@ -174,14 +233,22 @@ window.CompanionOutputPage=(()=>{
   }
   async function exportAlbum(){
     if(albumBusy||!albumSelectedIds.size)return;
-    const id=ticket,ids=[...albumSelectedIds];
+    const id=ticket;
     albumBusy="export";albumNotice="正在打包选中的图片…";albumError="";renderAlbum();
     try{
-      const data=await product().request("POST",albumEndpoint()+"/export",{image_ids:ids});
-      if(!live(id))return;
-      if(typeof data?.data_url!=="string"||typeof data.filename!=="string")throw new Error("导出文件格式不完整");
-      downloadDataUrl(data.data_url,data.filename);
-      albumNotice=`已导出 ${Number(data.count)||ids.length} 张图片`;
+      const groups=selectedAlbumGroups();let count=0,archives=0,errors=[];
+      for(const [endpoint,imageIds] of groups){
+        try{
+          const data=await product().request("POST",endpoint+"/export",{image_ids:imageIds});
+          if(!live(id))return;
+          if(typeof data?.data_url!=="string"||typeof data.filename!=="string")throw new Error("导出文件格式不完整");
+          downloadDataUrl(data.data_url,groups.size>1?`${++archives}-${data.filename}`:data.filename);
+          count+=Number(data.count)||imageIds.length;
+        }catch(error){errors.push(ERRORS[error?.code]||error?.message||"导出失败");}
+        if(!live(id))return;
+      }
+      albumError=errors.join("；");
+      albumNotice=`已生成 ${count} 张图片的导出文件${groups.size>1?"（按来源账号分别下载压缩包）":""}${albumError?`；部分导出失败：${albumError}`:""}`;
     }catch(error){if(live(id)){albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"导出失败";albumNotice=albumError;}}
     finally{if(live(id)){albumBusy="";renderAlbum();}}
   }
@@ -191,10 +258,19 @@ window.CompanionOutputPage=(()=>{
     if(typeof window.confirm==="function"&&!window.confirm(`确定从图库删除选中的 ${ids.length} 张图片？图片会从当前角色图库中移除，不会删除原始来源记录。`))return;
     const id=ticket;albumBusy="hide";albumNotice="正在从图库删除…";albumError="";renderAlbum();
     try{
-      const data=await product().request("POST",albumEndpoint()+"/hide",{image_ids:ids});
-      if(!live(id))return;
-      const removed=new Set(ids);albumItems=albumItems.filter(item=>!removed.has(item.image_id));
-      albumSelectedIds=new Set();albumSelected=-1;albumNotice=`已从图库删除 ${Number(data?.hidden)||ids.length} 张图片`;
+      const groups=selectedAlbumGroups();let count=0,errors=[];
+      for(const [endpoint,imageIds] of groups){
+        try{
+          const data=await product().request("POST",endpoint+"/hide",{image_ids:imageIds});
+          if(!live(id))return;
+          const removed=new Set(imageIds);albumItems=albumItems.filter(item=>!removed.has(item.image_id));
+          for(const imageId of imageIds)albumSelectedIds.delete(imageId);
+          count+=Number(data?.hidden)||imageIds.length;
+        }catch(error){errors.push(ERRORS[error?.code]||error?.message||"删除失败");}
+        if(!live(id))return;
+      }
+      albumSelected=-1;albumError=errors.join("；");
+      albumNotice=`已从图库删除 ${count} 张图片${albumError?`；部分删除未确认：${albumError}`:""}`;
       updatePreviewFromAlbum();
     }catch(error){if(live(id)){albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"删除失败";albumNotice=albumError;}}
     finally{if(live(id)){albumBusy="";renderAlbum();}}
@@ -223,7 +299,7 @@ window.CompanionOutputPage=(()=>{
     const id=ticket,imageId=albumReferenceImageId,label=albumReferenceLabel.trim();
     albumBusy="reference";albumReferenceError="";renderAlbum();
     try{
-      await product().request("POST",referenceEndpoint(),{image_id:imageId,label,
+      await product().request("POST",imageAlbumEndpoint(imageId).replace(/\/album$/,"")+"/references",{image_id:imageId,label,
         roles:[...albumReferenceRoles],operation_key:crypto.randomUUID()});
       if(!live(id))return;
       albumReferenceOpen=false;albumReferenceImageId="";
@@ -321,6 +397,100 @@ window.CompanionOutputPage=(()=>{
     const rows=items.map(item=>`<li class="output-observation-row"><span class="output-observation-state is-${esc(item.state)}"></span><span class="output-observation-main"><strong>${esc(action[item.action]||item.action)}</strong><small>${esc(formatTime(item.created_at))}</small></span><span class="output-observation-result">${esc(status[item.state]||item.state)}${item.elapsed_ms==null?"":` · ${(item.elapsed_ms/1000).toFixed(1)} 秒`}${item.error_code?` · ${esc(ERRORS[item.error_code]||item.error_code)}`:""}</span></li>`).join("");
     host.innerHTML=`<div class="output-observation-summary">${Number(observation.total)||0} 次调用 <span>最近 ${items.length} 条</span></div>${rows?`<ul class="output-observation-list">${rows}</ul>`:'<div class="output-observation-empty">当前角色还没有生图调用记录</div>'}`;
   }
+  const worksTarget=()=>{
+    const target=product()?.roleTarget?.(),role=product()?.role?.();
+    if(!target?.target_id||!role?.role_id||target.scope_kind!=="private")throw new Error("请先选择已绑定的私聊角色");
+    return {target_id:target.target_id,role_id:role.role_id};
+  };
+  function renderWorks(){
+    const host=root?.querySelector("[data-output-works-list]");
+    if(!host)return;
+    const sections=[["writing","正在创作"],["finished","已完成作品"]];
+    host.innerHTML=sections.map(([state,label])=>{
+      const rows=works.map((item,index)=>({item,index})).filter(({item})=>item.state===state);
+      return `<section><h3>${label}</h3><ul class="output-work-list">${rows.map(({item,index})=>`
+        <li><button type="button" data-output-native-action="work-preview" data-work-index="${index}">
+          <strong>${esc(item.title||"未命名作品")}</strong>
+          <small>${esc([item.work_type,formatTime(item.candidate_at||item.created_at),item.candidate_finished?"已写完，待采用":item.candidate_version?"有续写候选稿":""].filter(Boolean).join(" · "))}</small>
+        </button></li>`).join("")||'<li class="output-work-empty">暂无作品</li>'}</ul></section>`;
+    }).join("");
+  }
+  async function loadWorks(){
+    const host=root?.querySelector("[data-output-works-list]");
+    if(!host||worksBusy)return;
+    const id=ticket;
+    worksBusy=true;host.textContent="正在读取作品…";
+    try{
+      const data=await product().request("GET","works/library",worksTarget());
+      if(!live(id))return;
+      works=Array.isArray(data.works)?data.works:[];
+      worksLoaded=true;
+      renderWorks();
+      const dates=works.map(item=>item.candidate_at||item.created_at).sort();
+      updateContentSummary({available:true,works_count:works.length,
+        candidate_count:works.filter(item=>item.candidate_version).length,updated_at:dates.at(-1)});
+    }catch{
+      if(live(id)){worksLoaded=false;host.textContent="暂时无法读取作品。请核对当前私聊角色，然后刷新。";}
+    }finally{if(live(id))worksBusy=false;}
+  }
+  async function previewWork(item, candidate){
+    const dialog=root?.querySelector("[data-output-work-dialog]");
+    if(!dialog||!item)return;
+    const id=ticket,serial=++workTicket;
+    workSelection={item,candidate};
+    const body=dialog.querySelector("[data-output-work-text]");
+    const actions=dialog.querySelector("[data-output-work-actions]");
+    dialog.querySelector("[data-output-work-title]").textContent=item.title||"未命名作品";
+    actions.innerHTML=item.candidate_version?`
+      <button class="button small" type="button" data-output-native-action="work-head" aria-pressed="${!candidate}">当前正文</button>
+      <button class="button small" type="button" data-output-native-action="work-candidate" aria-pressed="${candidate}">续写候选稿</button>
+      ${candidate&&(item.candidate_append_only?'<span>旧版续写片段，请等待完整候选稿。</span>':'<button class="button small primary" type="button" data-output-native-action="work-adopt" disabled>采用这份稿</button>')||""}`:"";
+    body.textContent="正在读取正文…";
+    if(!dialog.open)dialog.showModal();
+    try{
+      const params={...worksTarget(),work_id:item.work_id,version_id:candidate?item.candidate_version:item.head_version};
+      const data=await product().request("GET","works/preview",params);
+      if(!live(id)||serial!==workTicket||!dialog.open)return;
+      body.replaceChildren();
+      const chapters=Array.isArray(data.chapters)?data.chapters:[];
+      for(const chapter of chapters){
+        const section=document.createElement("section");
+        if(chapter.title&&chapter.title!==item.title){
+          const heading=document.createElement("h3");heading.textContent=chapter.title;section.append(heading);
+        }
+        const text=document.createElement("p");text.textContent=chapter.text||"";section.append(text);body.append(section);
+      }
+      if(!chapters.length)body.textContent="这个版本没有正文。";
+      const adopt=actions.querySelector('[data-output-native-action="work-adopt"]');
+      if(adopt&&chapters.length)adopt.disabled=false;
+    }catch{
+      if(live(id)&&serial===workTicket)body.textContent="这个版本暂时无法读取。";
+    }
+  }
+  async function adoptWork(button){
+    if(!workSelection?.candidate)return;
+    const {item}=workSelection,id=ticket,serial=workTicket;
+    const dialog=button.closest("dialog");
+    if(!live(id)||serial!==workTicket||!dialog.open)return;
+    button.disabled=true;
+    try{
+      await product().request("POST","works/adopt",{...worksTarget(),
+        work_id:item.work_id,version_id:item.candidate_version,expected_revision:item.revision});
+      if(live(id)){
+        dialog.close();
+        await loadWorks();
+        void refreshObservability();
+      }
+    }catch(error){
+      if(live(id)&&serial===workTicket){
+        const message=document.createElement("span");
+        message.setAttribute("role","alert");
+        message.textContent=["revision_conflict","stale_candidate"].includes(error.code)
+          ?"作品已经更新，请关闭窗口并刷新后再采用。":"暂未确认采用。请刷新作品核对当前版本。";
+        button.after(message);
+      }
+    }
+  }
   function updateContentSummary(content){
     const available=content?.available===true;
     const works=available?Number(content.works_count)||0:null;
@@ -393,7 +563,7 @@ window.CompanionOutputPage=(()=>{
       const data=await product().request("GET",observationEndpoint());
       if(!live(id))return;
       observation=data?.images||{total:0,items:[]};
-      updateContentSummary(data?.content||null);
+      if(!worksLoaded)updateContentSummary(data?.content||null);
     }catch(error){
       if(!live(id))return;
       observation=null;observationError=ERRORS[error.code]||ERRORS[error.message]||"观测记录暂不可读";
@@ -513,14 +683,24 @@ window.CompanionOutputPage=(()=>{
   }
   function click(event){
     const target=event.target.closest("[data-output-native-action]");
-    if(!target||!root?.contains(target)||target.disabled||busy)return;
+    if(!target||!root?.contains(target)||target.disabled)return;
     const action=target.dataset.outputNativeAction,identifier=target.dataset.outputEndpoint;
+    if(busy&&!['works-refresh','work-preview','work-head','work-candidate','work-adopt'].includes(action))return;
     if(action==="refresh"){refresh();return;}
     if(action==="save"){save();return;}
     if(action==="test"){testEndpoint(identifier);return;}
     if(action==="reconnect"){reconnect();return;}
     if(action==="refresh-preferences"){void refreshPreferences();return;}
     if(action==="observability"){refreshObservability();return;}
+    if(action==="works-refresh"){void loadWorks();return;}
+    if(action==="work-preview"){
+      const item=works[Number(target.dataset.workIndex)];
+      void previewWork(item,!!item?.candidate_version);return;
+    }
+    if(action==="work-head"||action==="work-candidate"){
+      void previewWork(workSelection?.item,action==="work-candidate");return;
+    }
+    if(action==="work-adopt"){void adoptWork(target);return;}
     if(action==="jump-observability"){
       root.querySelector('#output-tab-capabilities')?.click();
       requestAnimationFrame(()=>root.querySelector("#outputObservationSection")?.scrollIntoView({behavior:"smooth",block:"start"}));
@@ -574,9 +754,9 @@ window.CompanionOutputPage=(()=>{
     if(action==="remove"&&index>=0){draft.endpoints.splice(index,1);for(const operation of ["generate","edit"])if(Array.isArray(draft.operation_routes?.[operation]))draft.operation_routes[operation]=draft.operation_routes[operation].filter(route=>route!==`online:${identifier}`);}
     render();
   }
-  function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;naiStatus=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;albumItems=[];albumCursor=null;albumLoaded=false;albumLoading=false;albumError="";albumSelected=-1;albumSelectedIds=new Set();albumNotice="";albumBusy="";albumReferenceOpen=false;albumReferenceImageId="";albumReferenceLabel="";albumReferenceRoles=new Set(["identity"]);albumReferenceError="";}
+  function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;naiStatus=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;albumSources=[];albumItems=[];albumCursor=null;albumLoaded=false;albumLoading=false;albumError="";albumSelected=-1;albumSelectedIds=new Set();albumNotice="";albumBusy="";albumReferenceOpen=false;albumReferenceImageId="";albumReferenceLabel="";albumReferenceRoles=new Set(["identity"]);albumReferenceError="";}
   function mount(node){
-    unmount();root=node;scope=product()?.scopeKey?.()||"";expanded=new Set();tests=new Map();testKeys=new Map();notice="";bad=false;observation=null;observationError="";sceneError="";
+    unmount();root=node;scope=product()?.scopeKey?.()||"";works=[];worksLoaded=false;worksBusy=false;workSelection=null;expanded=new Set();tests=new Map();testKeys=new Map();notice="";bad=false;observation=null;observationError="";sceneError="";
     if(!root)return;
     abort=new AbortController();
     root.addEventListener("input",input,{signal:abort.signal});
@@ -585,6 +765,8 @@ window.CompanionOutputPage=(()=>{
     refresh();
     loadAlbum(false);
     refreshObservability();
+    if(!root.querySelector("#output-panel-creation")?.hidden)showWorks();
   }
-  return {mount,unmount,refresh,refreshObservability,configUpdated:renderScenePresets};
+  function showWorks(){if(!worksLoaded)void loadWorks();}
+  return {mount,unmount,refresh,refreshObservability,showWorks,configUpdated:renderScenePresets};
 })();

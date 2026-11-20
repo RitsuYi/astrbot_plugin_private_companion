@@ -1,9 +1,10 @@
-const assert = require('node:assert/strict');
+﻿const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+const workbench = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/workbench-page.js'), 'utf8');
 const source = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/models-page.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const TOKEN = 'a'.repeat(64);
@@ -94,6 +95,7 @@ function harness() {
     createObjectURL: blob => { audioBlobs.push(blob); return `blob:preview-${audioBlobs.length}`; },
     revokeObjectURL: url => revokedAudioUrls.push(url),
   };
+  vm.runInNewContext(workbench, {window, setTimeout, clearTimeout});
   vm.runInNewContext(source, {window, crypto: window.crypto, AbortController, setTimeout, clearTimeout});
   function root() {
     const handlers = {};
@@ -127,7 +129,9 @@ function harness() {
       change(selector, dataset) { this.fire('change', selector, dataset); },
     };
   }
-  return {page: window.CompanionModelsPage, requests, root, store, audioBlobs, revokedAudioUrls};
+  return {page: window.CompanionModelsPage, requests, root, store, audioBlobs, revokedAudioUrls, product: window.CompanionProduct};
+  return {page: window.CompanionModelsPage, product: window.CompanionProduct,
+    requests, root, store, audioBlobs, revokedAudioUrls};
 }
 
 test('embedded migration models read and save through the explicit destination endpoint', async () => {
@@ -248,8 +252,8 @@ test('core reply uses AstrBot routing and saves only its effective extra prompt'
   post.resolve({replayed: false, task: core});
   await flush();
   node.click('[data-model-sub]', {modelSub: 'pol'});
-  assert.doesNotMatch(node.innerHTML, /<option value="conversation.reply"/);
-  assert.match(node.innerHTML, /<option value="memory.reflect"/);
+  assert.match(node.innerHTML, /<option value="conversation\.reply"/);
+  assert.match(node.innerHTML, /<option value="memory\.reflect"/);
   h.page.unmount();
 });
 
@@ -263,7 +267,7 @@ test('the routing matrix lists every registered task with its provider', async (
   await flush();
   assert.match(node.innerHTML, /任务/);
   assert.match(node.innerHTML, /对话回复/);
-  assert.match(node.innerHTML, /记忆整理/);
+  assert.match(node.innerHTML, /事实整理/);
   assert.match(node.innerHTML, /2<\/b><span>可用模型/);
   assert.match(node.innerHTML, /前台/);
   assert.doesNotMatch(node.innerHTML, /保存本任务/);
@@ -293,7 +297,7 @@ test('a slow reply from a previous mount cannot overwrite the current matrix', a
   requests[0].resolve(status());
   await flush();
   assert.match(second.innerHTML, /对话回复/);
-  assert.doesNotMatch(second.innerHTML, /记忆整理/);
+  assert.doesNotMatch(second.innerHTML, /事实整理/);
 });
 
 test('switching a provider inline raises one queued change and posting saves that task only', async () => {
@@ -423,8 +427,8 @@ test('provider search narrows tasks and a routed task opens its editor', async (
   requests[0].resolve(status());
   await flush();
   node.click('[data-model-view]', {modelView: 'providers'});
-  node.input('[data-model-search]', {value: '记忆'});
-  assert.match(node.innerHTML, /记忆整理/);
+  node.input('[data-model-search]', {value: '事实'});
+  assert.match(node.innerHTML, /事实整理/);
   assert.doesNotMatch(node.innerHTML, /对话回复/);
   node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
   assert.match(node.innerHTML, /data-model-view="tasks" aria-pressed="true"/);
@@ -1215,7 +1219,7 @@ test('switching tabs round-trip keeps the functional matrix without reloading', 
   node.click('[data-model-tab]', {modelTab: 'fn'});
   await flush();
   assert.match(node.innerHTML, /对话回复/);
-  assert.match(node.innerHTML, /记忆整理/);
+  assert.match(node.innerHTML, /事实整理/);
   // exactly one functional GET happened on mount; switching back reused in-memory state
   const fnGets = requests.filter(r => r.method === 'GET' && r.route === 'model');
   assert.equal(fnGets.length, 1, 'functional matrix must not be re-fetched on tab return');
@@ -1496,7 +1500,7 @@ test('the refusal switch saves fallback_on_refusal for the task', async () => {
   assert.match(node.innerHTML, /已保存 1 项/);
 });
 
-test('replacement policy keeps ordinary AstrBot replies out of the task selector', async () => {
+test('the replacement policy includes the core reply for time-window provider switches', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
@@ -1508,7 +1512,7 @@ test('replacement policy keeps ordinary AstrBot replies out of the task selector
   const selectorStart = node.innerHTML.indexOf('<select data-model-pol-task');
   const selectorEnd = node.innerHTML.indexOf('</select>', selectorStart);
   const selector = selectorStart >= 0 && selectorEnd >= 0 ? node.innerHTML.slice(selectorStart, selectorEnd + 9) : '';
-  assert.doesNotMatch(selector, /conversation\.reply/);
+  assert.match(selector, /conversation\.reply/);
   assert.match(selector, /memory\.reflect/);
 });
 
@@ -1684,6 +1688,49 @@ test('search service binds and saves an AstrBot DeepSeek Provider id', async () 
   assert.match(node.innerHTML, /后续搜索立即生效/);
   assert.equal(page.isDirty(), false);
   page.unmount();
+});
+
+test('group Laya reads global settings and offers a visible same-role conversation switch', async () => {
+  const h = harness(), node = h.root(), chosen = [];
+  const group = {target_id: 'group', scope_kind: 'group', roles: [{role_id: 'role'}]};
+  const privateTarget = {target_id: 'private', scope_kind: 'private', roles: [{role_id: 'role'}]};
+  h.product.selection = () => ({target_id: 'group', role_id: 'role'});
+  h.product.target = () => group;
+  h.product.targets = () => [group, privateTarget];
+  h.product.targetLabel = target => target.scope_kind === 'group' ? '群聊 测试群' : '私聊 测试用户';
+  h.product.choose = (targetId, roleId) => chosen.push([targetId, roleId]);
+  h.page.mount(node, {endpoint: '/astrbot_plugin_private_companion/host/targets/group/roles/role/model'});
+  h.requests[0].resolve({...status(), scope_kind: 'group'});
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  h.requests.find(item => item.route.endsWith('/laya')).resolve(layaRemoteStatus());
+  h.requests.find(item => item.route.endsWith('/laya/logs')).resolve({events: [], available: false});
+  await flush();
+
+  assert.match(node.innerHTML, /群聊 测试群/);
+  assert.match(node.innerHTML, /data-laya-target/);
+  assert.match(node.innerHTML, /私聊 测试用户/);
+  assert.match(node.innerHTML, /当前群聊的近期决策记录暂不能按会话汇总/);
+  assert.match(node.innerHTML, /Laya 决策模型/);
+  node.change('[data-laya-target]', {value: 'private'});
+  assert.deepEqual(chosen, [['private', 'role']]);
+  h.page.unmount();
+});
+
+test('Laya configuration still renders when the log request fails', async () => {
+  const h = harness(), node = h.root();
+  h.page.mount(node);
+  h.requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  h.requests.find(item => item.route === 'model/laya').resolve(layaRemoteStatus());
+  h.requests.find(item => item.route === 'model/laya/logs').reject(new Error('logs_unavailable'));
+  await flush();
+
+  assert.match(node.innerHTML, /Laya 决策模型/);
+  assert.match(node.innerHTML, /近期记录暂不可用；Laya 配置仍可查看和保存/);
+  assert.doesNotMatch(node.innerHTML, /无法读取 Laya 配置/);
+  h.page.unmount();
 });
 
 test('Laya local page explains CPU-only torch and disables the broken test', async () => {
@@ -2101,4 +2148,65 @@ test('Laya connection test forwards its long timeout to the page bridge', async 
   await flush();
   assert.match(node.innerHTML, /判断服务鉴权失败/, 'machine codes keep their existing message');
   page.unmount();
+});
+
+test('未选窗口时只编辑角色默认，不读取或保存窗口层', async () => {
+  const h = harness(), node = h.root();
+  h.product.selection = () => ({bot_id: 'bot-a', role_id: 'role-a', target_id: null});
+  h.page.mount(node, {sub: 'cfg'});
+  assert.equal(h.requests[0].params.layer, 'role');
+  h.requests[0].resolve(status()); await flush();
+  assert.match(node.innerHTML, /data-model-layer="window"[^>]*disabled/);
+  node.click('[data-model-layer]', {modelLayer: 'window'});
+  assert.equal(h.requests.length, 1);
+  node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
+  node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
+  node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
+  const saved = h.requests.find(request => request.method === 'POST');
+  assert.equal(saved.values.layer, 'role');
+  saved.resolve({replayed: false, task: task('memory.reflect', 'secondary')}); await flush();
+  h.page.unmount();
+});
+
+test('群窗口模型覆盖使用本群接口，角色模型服务使用同角色完整入口', async () => {
+  const h = harness(), node = h.root();
+  const base = '/astrbot_plugin_private_companion/host/targets/';
+  h.product.selection = () => ({bot_id: 'bot-a', role_id: 'role-a', target_id: 'group-a'});
+  h.product.role = () => ({role_id: 'role-a', model_api: base + 'group-a/roles/role-a/model'});
+  h.product.roleTarget = () => ({scope_kind: 'private', roles: [{role_id: 'role-a', model_api: base + 'private-a/roles/role-a/model'}]});
+  h.page.mount(node, {sub: 'cfg'});
+  assert.equal(h.requests[0].route, 'host/targets/group-a/roles/role-a/model');
+  h.requests[0].resolve(status()); await flush();
+  node.click('[data-model-layer]', {modelLayer: 'window'});
+  assert.ok(h.requests[1], node.innerHTML);
+  assert.equal(h.requests[1].route, 'host/targets/group-a/roles/role-a/model');
+  assert.equal(h.requests[1].params.layer, 'window');
+  const windowStatus = status();
+  windowStatus.tasks.forEach(task => { task.configuration_layer = 'window'; });
+  h.requests[1].resolve(windowStatus); await flush();
+  node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
+  node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
+  node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
+  const saved = h.requests.find(request => request.method === 'POST');
+  assert.equal(saved.route, 'host/targets/group-a/roles/role-a/model/configure');
+  assert.equal(saved.values.layer, 'window');
+  saved.resolve({replayed: false, task: task('memory.reflect', 'secondary')}); await flush();
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  const service = h.requests.filter(request => request.route.endsWith('/laya') || request.route.endsWith('/laya/logs'));
+  assert.equal(service.length, 2);
+  assert.ok(service.every(request => request.route.startsWith('host/targets/private-a/roles/role-a/')));
+  service.forEach(request => request.resolve({})); await flush();
+  h.page.unmount();
+});
+
+test('仅有群入口的角色不请求不存在的模型连接服务', async () => {
+  const h = harness(), node = h.root();
+  h.product.selection = () => ({bot_id: 'bot-a', role_id: 'role-a', target_id: null});
+  h.product.roleTarget = () => ({scope_kind: 'group'});
+  h.page.mount(node);
+  h.requests[0].resolve(status()); await flush();
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  assert.equal(h.requests.length, 1);
+  assert.match(node.innerHTML, /只有群聊模型入口/);
+  h.page.unmount();
 });

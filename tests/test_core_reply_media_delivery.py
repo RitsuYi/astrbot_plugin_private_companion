@@ -79,6 +79,12 @@ class NativeReplyMessagesTests(unittest.TestCase):
 
         self.assertEqual(kinds(groups), [[Reply, Record, Plain]])
 
+    def test_qq_official_text_and_voice_are_separate_messages(self):
+        chain = MessageChain(chain=[Plain("你好"), Record(file=silent_wav())])
+        groups = native_reply_messages(_Event("qq_official"), chain)
+
+        self.assertEqual(kinds(groups), [[Plain], [Record]])
+
     def test_image_attachment_still_splits_from_the_caption(self):
         chain = MessageChain(chain=[Plain("你好"), Image.fromURL("https://example.invalid/a.png")])
         groups = native_reply_messages(_Event(), chain)
@@ -110,6 +116,12 @@ class NativeReplyMessagesTests(unittest.TestCase):
         for group in groups:
             body = [item for item in wire(group) if item["type"] not in {"reply", "at"}]
             self.assertTrue(body, f"{kinds([group])} would arrive as an empty message")
+
+    def test_expression_markers_never_reach_the_wire(self):
+        chain = MessageChain(chain=[Plain("&&angry&&我没事&&sad&&")])
+        groups = native_reply_messages(_Event(), chain)
+
+        self.assertEqual([item["data"]["text"] for item in wire(groups[0]) if item["type"] == "text"], ["我没事"])
 
     def test_a_message_with_nothing_to_render_is_not_sent_at_all(self):
         for chain in ([Reply(id="4601")], [Reply(id="4601"), At(qq="1538054427")], [Plain("   ")]):

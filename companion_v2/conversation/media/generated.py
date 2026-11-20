@@ -12,6 +12,7 @@ from companion_v2.identity_policy.models import AuthenticatedHostPrincipal
 from companion_v2.sharing.models import ShareMaterial, ShareMaterialKind
 from companion_v2.sources.dependencies import key, link
 from companion_v2.sources.models import AssetRecord, GovernanceState, SourceRecord
+from companion_v2.storage.image_payloads import store_image
 
 from .models import (
     CapturedImage, ImageDescriptor, PromptImage, check_manifest, fits_budget,
@@ -274,7 +275,13 @@ class GeneratedImages:
 
     def album_image(self, context, at, image_id):
         """Re-read one exact accepted image after checking its original context and receipt."""
-        if type(image_id) is not str or len(image_id) > 180 or not image_id.startswith("generated-image:"):
+        if type(image_id) is not str or len(image_id) > 180:
+            raise TaskError("generated_image_missing", "the selected album image is unavailable")
+        if image_id.startswith("imgart_"):
+            self.messages.authorize(context, at)
+            from .native_generated_album import artifact
+            return artifact(self, context, at, image_id)
+        if not image_id.startswith("generated-image:"):
             raise TaskError("generated_image_missing", "the selected album image is unavailable")
         try:
             _, invocation_id, raw_position = image_id.split(":", 2)
@@ -559,7 +566,9 @@ class GeneratedImages:
                 link(self.runtime, source, (reference,), at)
                 require(self.messages.images.assets.publish(AssetRecord(asset, context.audience), observed_at=at))
                 values = (*key(reference), image.descriptor.position, *key(source), asset.asset_id,
-                          asset.version.lineage_id, asset.version.revision, encode(image.descriptor), image.content)
+                          asset.version.lineage_id, asset.version.revision, encode(image.descriptor),
+                          store_image(self.runtime.data_root, image.content,
+                                      mime_type=getattr(image.descriptor, "mime_type", "")))
                 old = connection.execute("""SELECT * FROM conversation_image_payloads WHERE parent_id = ?
                     AND parent_lineage = ? AND parent_revision = ? AND position = ?""", values[:4]).fetchone()
                 if old is not None and tuple(old) != values:

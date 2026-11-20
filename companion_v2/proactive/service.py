@@ -29,7 +29,7 @@ from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.delivery.history import HistoricalText, VERSION as HISTORY_VERSION
 from companion_v2.execution.models import (Lane, ProviderBinding, SideEffect, TaskDefinition, TaskError,
     TaskRegistration, TaskResult, TaskSpec, digest, encode, require, stamp)
-from companion_v2.execution.runner import ExactTaskRunner, RunResult
+from companion_v2.execution.runner import CAPACITY_REFUSALS, ExactTaskRunner, RunResult
 from companion_v2.execution.service import outcome
 from companion_v2.expression.configuration import read_settings as expression_settings
 from companion_v2.foundation.outcome import Outcome
@@ -60,6 +60,13 @@ from .official_alert_events import SOURCE_OWNER as OFFICIAL_ALERT_SOURCE_OWNER, 
 CONTACT_KIND = "proactive.compose"
 PLAN_KIND = "proactive.plan"
 JUDGE_TIMEOUT_SECONDS = 90
+# A manual diagnostic composes on the same single background lane as automatic
+# contact work. Wait for a free slot instead of reporting the collision as an
+# admission denial; the bound keeps the operator's test from hanging on a long
+# automatic composition.
+CONTACT_SLOT_WAIT_SECONDS = 20.0
+_CONTACT_SLOT_POLL_SECONDS = 0.2
+CONTACT_LANE_BUSY = "proactive_lane_busy"
 _SEGMENTATION_DEFAULTS = asdict(SegmentationPolicy())
 _SEGMENTATION_KEYS = frozenset(_SEGMENTATION_DEFAULTS)
 _SEGMENTATION_SETTINGS_KEYS = _SEGMENTATION_KEYS | frozenset((
@@ -165,8 +172,10 @@ class ProactiveContacts:
         self.gateway, self.delivery, self.tasks = gateway, delivery, gateway.tasks
         self.require_running, self.notify = require_running, notify
         self.preferences = ProactivePreferences(self.configuration, self.tasks)
-        self.runner = ExactTaskRunner(self.tasks, frozenset({CONTACT_KIND}), self._generate)
-        self.plan_runner = ExactTaskRunner(self.tasks, frozenset({PLAN_KIND}), self._plan_generate)
+        self.runner = ExactTaskRunner(self.tasks, frozenset({CONTACT_KIND}), self._generate,
+                                      retain_refusals=True)
+        self.plan_runner = ExactTaskRunner(self.tasks, frozenset({PLAN_KIND}), self._plan_generate,
+                                           retain_refusals=True)
         self.judge_runner = ExactTaskRunner(self.tasks, frozenset({JUDGE_KIND}), self._judge_generate)
 
     def attach_semantics(self, semantics):
@@ -407,7 +416,7 @@ class ProactiveContacts:
         return voice, poke
 
     def start(self):
-        row = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", (GROUP,))
+        row = self.configuration.store.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", (GROUP,))
         self.generation = self.configuration.start_consumer(GROUP, expected_generation=row["generation"] if row else 0)
 
     def proactive_denied(self, context, *, at=None):
@@ -494,7 +503,7 @@ class ProactiveContacts:
     def _adopt(self, context, preferences):
         # The persisted receipt survives restart and transactional rollback;
         # an unchanged polling pass must not rewrite it every second.
-        row = self.runtime.read_one("""SELECT a.state, a.resolution_token, a.generation FROM configuration_applications a
+        row = self.configuration.store.read_one("""SELECT a.state, a.resolution_token, a.generation FROM configuration_applications a
             JOIN configuration_consumers c ON c.consumer_id = a.consumer_id AND c.generation = a.generation
             WHERE a.target_key = ? AND a.group_id = ? AND a.consumer_id = ?""",
             (preferences.snapshot.target.key, GROUP, GROUP))
@@ -597,10 +606,13 @@ class ProactiveContacts:
 
     async def contact(self, context, opportunity, intents, *, role_instruction, selection_seed,
                       automatic_origin=None, administrator_test=False, diagnostic_source_backed=False,
-                      diagnostic_origin=None, diagnostic_image_intent=None):
+                      diagnostic_origin=None, diagnostic_image_intent=None, diagnostic_allow_linked_accounts=False):
         """Trusted producer API; no model may fabricate its cause, identity or persona."""
         if type(administrator_test) is not bool:
             raise ValueError("administrator_test must be an explicit boolean")
+        if (type(diagnostic_allow_linked_accounts) is not bool
+                or (diagnostic_allow_linked_accounts and not administrator_test)):
+            raise ValueError("linked diagnostic routing requires an explicit administrator test")
         if type(diagnostic_source_backed) is not bool:
             raise ValueError("diagnostic_source_backed must be an explicit boolean")
         if (diagnostic_image_intent is not None and
@@ -637,7 +649,8 @@ class ProactiveContacts:
                               + ([diagnostic_origin] if diagnostic_origin is not None else [])
                               + (["diagnostic-image", diagnostic_image_intent]
                                  if diagnostic_image_intent is not None else [])
-                              + (["administrator_test"] if administrator_test else []))
+                              + (["administrator_test"] if administrator_test else [])
+                              + (["diagnostic_allow_linked_accounts"] if diagnostic_allow_linked_accounts else []))
         try:
             self.require_running()
             if not administrator_test and self.platform_circuit.cooldown_until(
@@ -728,7 +741,8 @@ class ProactiveContacts:
                         selection.feasible_count, selection.weight_used, history, interaction, selected_origin,
                         administrator_test=administrator_test,
                         diagnostic_source_backed=diagnostic_source_backed, diagnostic_origin=diagnostic_origin,
-                        diagnostic_image_intent=diagnostic_image_intent)
+                        diagnostic_image_intent=diagnostic_image_intent,
+                        diagnostic_allow_linked_accounts=diagnostic_allow_linked_accounts)
                     presentation = ReplySettings(self.configuration).capture(context, at)["settings"]
                     segmentation_settings = {key: presentation[key]
                                              for key in _SEGMENTATION_SETTINGS_KEYS if key in presentation}
@@ -762,7 +776,11 @@ class ProactiveContacts:
                 raise
             try:
                 if plan_task_id is not None:
-                    plan_attempt = require(await self.plan_runner.run(context, plan_task_id))
+                    planning = await self._run_exact(self.plan_runner, context, plan_task_id, task_deadline,
+                        wait_seconds=CONTACT_SLOT_WAIT_SECONDS if administrator_test else 0.0)
+                    if planning.failure is not None:
+                        return planning
+                    plan_attempt = planning.unwrap()
                     if plan_attempt.stop_code:
                         return Outcome.failed(plan_attempt.stop_code, "contact planning did not complete")
                     result_data = self._plan_results.pop(plan_task_id, None)
@@ -779,8 +797,11 @@ class ProactiveContacts:
                         self._pending[task_id] = planned_job
                         require(self.tasks.submit(TaskSpec(task_id, context, CONTACT_KIND, request_hash, task_id,
                             opportunity.opened_at, task_deadline)))
-                result = await self.runner.run(context, task_id)
-                if administrator_test and result.is_success and result.unwrap().failure_code:
+                result = await self._run_exact(self.runner, context, task_id, task_deadline,
+                    wait_seconds=CONTACT_SLOT_WAIT_SECONDS if administrator_test else 0.0)
+                if result.failure is not None:
+                    return result
+                if administrator_test and result.unwrap().failure_code:
                     return Outcome.failed(result.unwrap().failure_code,
                                           "administrator diagnostic task failed before delivery")
                 if result.is_success and (result.unwrap().task is None or result.unwrap().task.state in ("created", "retry_scheduled")):
@@ -796,11 +817,53 @@ class ProactiveContacts:
         except (TaskError, ConfigurationError) as error:
             return Outcome.failed(error.code, str(error))
 
+    async def _run_exact(self, runner, context, task_id, deadline, *, wait_seconds):
+        """Run one exact task, waiting for a free shared background slot.
+
+        ``task_lane_full`` names physical capacity, not this task's authority:
+        the submitted row is still exactly what the owner handed over, and the
+        runner keeps it queued (``retain_refusals``). A manual diagnostic must
+        not turn that transient collision into an admission denial, so it keeps
+        re-claiming the same row by id while its own deadline allows. A row that
+        never got a slot is retired with its real cause instead of staying
+        queued for an attempt nobody will run.
+        """
+        if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds:
+            raise ValueError("capacity wait must be a bounded non-negative number")
+        loop = asyncio.get_running_loop()
+        ends_at = loop.time() + wait_seconds
+        result = await runner.run(context, task_id)
+        try:
+            while result.failure is None and result.unwrap().refused in CAPACITY_REFUSALS:
+                remaining = min(ends_at - loop.time(), (deadline - self.tasks.now()).total_seconds())
+                if self._closed or remaining <= 0:
+                    break
+                await asyncio.sleep(min(_CONTACT_SLOT_POLL_SECONDS, remaining))
+                result = await runner.run(context, task_id)
+        except BaseException:
+            # The caller's prepared inputs die with this invocation, so a
+            # reservation nobody will honour must not stay queued. Cleanup must
+            # never mask the original cancellation or error.
+            try:
+                self.tasks.discard_queued(task_id, reason="owner_unavailable", code=CONTACT_LANE_BUSY)
+            except Exception:
+                pass
+            raise
+        if result.failure is None and result.unwrap().refused in CAPACITY_REFUSALS:
+            code = CONTACT_LANE_BUSY if wait_seconds else result.unwrap().refused
+            retired = self.tasks.discard_queued(task_id, reason="owner_unavailable", code=code)
+            if retired.failure is not None:
+                return retired
+            return Outcome.failed(code, "the shared background lane stayed occupied before this task could start")
+        return result
+
     def record_delivery_receipt(self, request, receipt):
         if request.owner != GROUP or request.context.scope.account_id is None:
             return
         rejected = receipt.status == "not_sent" and receipt.failure_code == "qq_eventchecker_1200"
-        self.platform_circuit.record(request.context, at=self.tasks.now(),
+        router = getattr(self.delivery, "private_account_router", None)
+        actual = router.actual_context(request.delivery_id) if router is not None else None
+        self.platform_circuit.record(actual or request.context, at=self.tasks.now(),
             failure_code=receipt.failure_code if rejected else None,
             reset_failures=(receipt.status in ("delivered", "accepted")
                             or receipt.status == "not_sent" and not rejected))
@@ -880,7 +943,7 @@ class ProactiveContacts:
             provider.reserve(plan.envelope)
             return True, None
         except TaskError as error:
-            if error.code not in ("host_model_limit_input", "host_model_limit_output"):
+            if error.code not in ("host_model_limit", "host_model_limit_input", "host_model_limit_output"):
                 raise
             detail = {"limit_code": error.code, "provider_id": provider.binding.provider,
                       "requested_output_tokens": plan.envelope.max_output_tokens,
@@ -1252,6 +1315,7 @@ class ProactiveContacts:
                 "purpose": job.intent.purpose, "preference_token": job.preference_token,
                 "sources": job.intent.thought.evidence.sources, "source_hashes": job.source_hashes,
                 "administrator_test": job.administrator_test,
+                "diagnostic_allow_linked_accounts": job.diagnostic_allow_linked_accounts,
                 "diagnostic_image": job.diagnostic_image_intent is not None,
                 "opened_at": job.intent.thought.opportunity.opened_at,
                 "expires_at": job.deadline_at or job.intent.thought.opportunity.expires_at,
@@ -1955,6 +2019,10 @@ class ProactiveContacts:
                 delivery_state = "failed"
             else:
                 delivery_state = "cancelled"
+            router = getattr(self.delivery, "private_account_router", None)
+            report = getattr(router, "rejection_report", None)
+            route_rejections = [dict(item, delivery_id=row["delivery_id"])
+                for row in deliveries for item in (report(row["delivery_id"]) if report else [])]
             model_task_ids = [task_id]
             plan_task_id = data.get("plan_task_id")
             if isinstance(plan_task_id, str) and plan_task_id:
@@ -2022,6 +2090,7 @@ class ProactiveContacts:
                 "judge_reason": judge.get("failure") or judge.get("reason"),
                 "delivery_id": delivery["delivery_id"] if delivery else None,
                 "delivery": delivery_state,
+                "route_rejections": route_rejections,
                 "receipt_ref": delivery["receipt_ref"] if delivery else None,
                 "delivery_parts": [{"sequence": DeliveryRequest.restore(item["request_json"]).sequence,
                     "delivery_id": item["delivery_id"], "state": item["state"],

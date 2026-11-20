@@ -138,7 +138,7 @@ window.CompanionConfigEditors = (() => {
               "news_check_interval_minutes", "news_daily_hot_read_enabled", "news_hot_sources",
               "news_hot_result_count"]},
     {id: "web", title: "网络探索",
-     help: "探索按兴趣词搜索，结果只作为资讯契机；最短间隔与每次条数限制的是读取量，不是发送量。",
+     help: "启用后会按近期生日、纪念日、日程和关注方向生成探索目标；每轮只研究一个目标，结果先存研究笔记，生日等惊喜目标不会直接说破。最短间隔限制的是探索频率；私聊发送「陪伴 探索笔记」查看最近结果。",
      fields: ["web_exploration_enabled", "web_exploration_interests",
               "web_exploration_min_interval_hours", "web_exploration_result_count"]},
     {id: "selflink", title: "外部事件与自身经历关联",
@@ -213,7 +213,11 @@ window.CompanionConfigEditors = (() => {
               "feed_recent_posts", "comment_recent_posts"]},
     {id: "throttle", title: "发布节流",
      help: "总闸与「允许发说说」都打开后才生效。这几项限制的是频率与条数，不放宽任何一项能力开关。",
-     fields: ["action_min_interval_minutes", "max_actions_per_tick", "publish_max_daily"]},
+     fields: ["action_min_interval_minutes", "max_actions_per_tick", "daily_limits_enabled", "publish_max_daily"]},
+    {id: "life", title: "生活说说",
+     help: "低频把角色自己的生活发到空间。检查到点时先记一次尝试，再写草稿、走和手动发说说完全相同的发布链路与审计；失败或结果未知都不会立刻重来。",
+     fields: ["life_publish_enabled", "life_publish_probability", "life_publish_min_interval_hours",
+              "life_publish_max_daily", "life_publish_retry_minutes", "life_publish_style_prompt"]},
     {id: "topics", title: "主题判定",
      help: "一条说说在写出正文之前必须先定主题与场景：这里决定谁来定、要不要人工确认，以及给模型的补充指引。",
      fields: ["topic_auto_enabled", "topic_require_confirmation", "topic_prompt_guidance"]},
@@ -408,7 +412,7 @@ window.CompanionConfigEditors = (() => {
     },
     reaction: {
       title: "表情检索",
-      note: "决定表情素材怎么被检索与复用；视觉复核仍需扩展可用。",
+      note: "表情回复会先从素材库按文字与向量检索候选，再按下面设置决定复核与发送；这里只改检索口径，不动素材本身。",
       scopeNote: "插件安装全局",
       labels: {
         low_latency_enabled: "低延迟模式",
@@ -422,9 +426,15 @@ window.CompanionConfigEditors = (() => {
         vision_verify_mode: "视觉复核",
       },
       helps: {
-        low_latency_enabled: "开启后跳过较慢的复核路径，优先按时发出。",
-        embedding_backfill_interval_seconds: "0 表示不按间隔补齐。",
-        embedding_weight: "与词法分的相对权重；越大越偏语义相近。",
+        low_latency_enabled: "开启后跳过较慢的复核路径，优先按时发出；回复更及时，但误选表情的概率会高一点。",
+        embedding_backfill_enabled: "为还没有向量的表情素材在后台补建索引；关闭后只检索已经建好向量的素材。",
+        candidate_limit: "每一轮最终交给回复阶段的候选数量。调大更容易找到贴切素材，也会增加复核与生成的负担。",
+        embedding_candidate_limit: "向量检索先取回多少条做粗筛。调大召回更广，但内存和计算量也会上升；1200 适合大多数素材库。",
+        embedding_backfill_batch_size: "后台每次补建多少条向量。调大补得快，但会占用更多 CPU / 内存，低配设备建议保持 24 左右。",
+        embedding_backfill_interval_seconds: "两轮后台补建之间等待多久；0 表示不按固定间隔补齐，只在需要时补。",
+        embedding_weight: "向量分与文字分的相对权重；越大越偏向语义相近，越小越依赖关键词。",
+        embedding_score_threshold: "向量相似度低于这个值就不进入候选；调高更严格、更少但更准，调低更宽松。",
+        vision_verify_mode: "是否让视觉模型再看一眼候选图：不复核最快；仅向量命中时复核兼顾速度与准确；每次复核最稳但最慢。",
       },
       choices: {vision_verify_mode: {off: "不复核", embedding: "仅向量命中时复核", always: "每次复核"}},
       order: ["low_latency_enabled", "embedding_backfill_enabled", "candidate_limit",
@@ -577,7 +587,14 @@ window.CompanionConfigEditors = (() => {
         cross_window_group_identity_enabled: "群内识别私聊关系",
         cross_window_peer_minutes: "群互动回看分钟",
         cross_window_peer_reply_minutes: "接话回看分钟",
+        private_group_context_mode: "群聊引用私聊上下文",
+        private_group_context_minutes: "私聊回看分钟",
+        private_group_context_chars: "私聊摘要字数",
       },
+      choices: {private_group_context_mode: {
+        base: "基础（熟人卡摘要）", summary: "私聊摘要", transparent: "通透",
+      }},
+      segmentedChoices: ["private_group_context_mode"],
       helps: {
         acquaintance_card_chars: "卡片过长会挤占上下文，建议只留关键内容。",
         cross_window_awareness_enabled: "关闭后不记录也不注入跨窗口在场；关闭熟人卡会一并关闭。",
@@ -590,12 +607,16 @@ window.CompanionConfigEditors = (() => {
         cross_window_group_identity_enabled: "群聊中仅告诉角色“这个成员也和你私聊过”，不暴露私聊内容。",
         cross_window_peer_minutes: "统计“群里还有几个人在说话”的短窗口。",
         cross_window_peer_reply_minutes: "统计“有人接你之前的话”的回看窗口。",
+        private_group_context_mode: "只对当前群发言人本人生效；基础档只给熟人卡摘要，私聊摘要/通透档才读取该用户私聊历史。",
+        private_group_context_minutes: "只读取这段时间内的私聊；超出部分不进入群聊上下文。",
+        private_group_context_chars: "摘要总字数上限；越长越占上下文，也越容易暴露私密细节。",
       },
       order: ["acquaintance_enabled", "acquaintance_card_chars", "cross_window_awareness_enabled",
         "cross_window_continuity_enabled", "cross_window_continuity_minutes",
         "cross_window_private_group_hours", "cross_window_max_items", "cross_window_attention_minutes",
         "cross_window_attention_wait_seconds", "cross_window_group_identity_enabled",
-        "cross_window_peer_minutes", "cross_window_peer_reply_minutes"],
+        "cross_window_peer_minutes", "cross_window_peer_reply_minutes",
+        "private_group_context_mode", "private_group_context_minutes", "private_group_context_chars"],
     },
     private_access: {
       title: "新用户默认权限",
@@ -655,6 +676,7 @@ window.CompanionConfigEditors = (() => {
         min_samples: "私聊样本门槛",
         group_min_samples: "群聊样本门槛",
         sample_chars: "单条样本长度上限",
+        minimum_confidence: "候选最低置信度",
         active_signal_limit: "待审与启用规则上限",
         rules_per_turn: "每轮注入规则数",
         payload_chars: "注入长度上限",
@@ -678,12 +700,13 @@ window.CompanionConfigEditors = (() => {
         private_application_enabled: "把学到的表达用在私聊回复里；关闭后仍可继续学习，只是不拿来回复。",
         group_application_enabled: "把学到的表达用在群聊回复里；关闭后群聊不受学习结果影响。",
         sample_review_enabled: "原始样本先进入待整理区，由你确认后再归纳成规则；未审核规则不会自动启用。",
+        minimum_confidence: "低于这个分数的单条候选不进入待审，减少一次性口癖和偶然句式；0 表示不过滤，默认 0.65。",
         style_review_enabled: "回复发出前检查是否学过头、照抄或断句不自然；只做小幅修正，不改事实和承诺。",
       },
       choices: {learning_mode: {light: "轻量", balanced: "均衡", aggressive: "深入"}},
       order: ["learning_mode", "private_application_enabled", "group_application_enabled",
         "sample_review_enabled", "style_review_enabled", "window_hours", "sample_limit",
-        "min_samples", "group_min_samples", "sample_chars", "scan_interval_minutes",
+        "min_samples", "group_min_samples", "sample_chars", "minimum_confidence", "scan_interval_minutes",
         "group_scan_interval_minutes",
         "group_daily_batch_limit", "group_new_messages", "active_signal_limit",
         "rules_per_turn", "payload_chars", "rotation_candidate_limit", "rotation_decay_hours"],
@@ -691,7 +714,7 @@ window.CompanionConfigEditors = (() => {
         {id: "behavior", title: "应用与复核", fields: ["learning_mode", "private_application_enabled",
           "group_application_enabled", "sample_review_enabled", "style_review_enabled"]},
         {id: "sampling", title: "采样策略", fields: ["window_hours", "sample_limit", "min_samples",
-          "group_min_samples", "sample_chars", "scan_interval_minutes", "group_scan_interval_minutes",
+          "group_min_samples", "sample_chars", "minimum_confidence", "scan_interval_minutes", "group_scan_interval_minutes",
           "group_daily_batch_limit",
           "group_new_messages"]},
         {id: "rotation", title: "规则容量", fields: ["active_signal_limit", "rules_per_turn",
@@ -959,7 +982,7 @@ window.CompanionConfigEditors = (() => {
         enable_rest_reply_simulation: "启用休息时段回复判定",
         rest_reply_mode: "判定方式",
         rest_reply_probability: "概率判定放行率（%）",
-        rest_reply_llm_threshold: "模型判定放行分阈值",
+        rest_reply_llm_threshold: "叫醒评分阈值（0=关闭评分捷径）",
         rest_reply_active_windows: "生效时段",
         rest_reply_awake_grace_minutes: "被唤醒后免重判（分钟）",
         enable_rest_backlog_reply: "记录休息期未回消息",
@@ -984,6 +1007,7 @@ window.CompanionConfigEditors = (() => {
         dream_afterglow_mode: "决定醒后余韵写得多明显；自动按上下文决定。",
         enable_rest_reply_simulation: "关闭时休息时段不额外判定，按正常流程回复。",
         rest_reply_mode: "概率判定按下面的百分比放行；模型判定按边界分与模型分决定。",
+        rest_reply_llm_threshold: "评分达到该值就直接叫醒：100 是「快醒/起床/救命」这类明确请求，72 是「在吗/睡了吗/想你」。阈值越低越容易被叫醒；设为 0 关闭这条捷径，概率判定只按百分比放行，模型判定只看模型分。",
         rest_reply_active_windows: "形如 23:00-08:30,12:20-13:40；结束时间早于开始时间视为跨零点。留空表示全天生效。",
         rest_reply_awake_grace_minutes: "被叫醒后的这段时间里不再重新判定，避免又被当成在睡。",
         enable_rest_backlog_reply: "开启后会记录休息期间收到的消息，醒来时作为补看材料；不会逐条补发。",
@@ -1576,10 +1600,10 @@ window.CompanionConfigEditors = (() => {
      * 在空间里公开动作（总闸 + 三个能力开关）、一轮能做多少（间隔、条数、
      * 每日上限），以及一条说说要满足什么条件才发得出去（主题判定 + 七个主题）。
      * 值按角色共享，窗口层只作为旧值的回落，
-     * 卡片右上角那句由内核按继承链写，不需要自己声明 scopeNote。
+     * 卡片右上角由内核显示实际写入层，无需另外声明 scopeNote。
      *
-     * 注册表里这一组是 47 项：9 项全局 + 7 个主题各 5 项。主题那 35 项由下面
-     * 两张表拼出来——47 个字段名手写一遍，漏一个不会有任何报错，只会让审计
+     * 七个主题各 5 项由下面两张表拼出来——所有字段名手写一遍，
+     * 漏一个不会有任何报错，只会让审计
      * 报「没有控件声明」；场景取值也必须与后端 topics.py 的 TOPIC_SPECS 一致，
      * 多写一个合法的场景 id 会在后端整组校验时被拒（那个场景不属于这个主题）。 */
     qzone: {
@@ -1594,10 +1618,16 @@ window.CompanionConfigEditors = (() => {
         comment_recent_posts: "回复前回看自己的说说条数",
         action_min_interval_minutes: "两次同类公开动作最短间隔（分钟）",
         max_actions_per_tick: "单轮公开动作上限",
+        daily_limits_enabled: "启用每日次数限制",
         publish_max_daily: "每日说说上限",
         topic_auto_enabled: "允许模型自行发布",
         topic_require_confirmation: "主题必须人工确认",
         topic_prompt_guidance: "补充表达指引",
+        life_publish_enabled: "启用生活说说",
+        life_publish_probability: "每次检查的发布概率",
+        life_publish_min_interval_hours: "两条生活说说最短间隔（小时）",
+        life_publish_max_daily: "生活说说每日上限",
+        life_publish_style_prompt: "生活说说风格补充",
         ...Object.fromEntries(QZONE_TOPIC_SECTIONS.flatMap(({prefix, title}) => [
           [prefix + "_enabled", title + " · 启用"],
           [prefix + "_scenes", title + " · 允许的场景"],
@@ -1615,15 +1645,22 @@ window.CompanionConfigEditors = (() => {
         comment_recent_posts: "回复前回看自己最近几条说说，用来判断上下文，1 到 20。",
         action_min_interval_minutes: "点赞、回复、发说说共用这一条间隔，5 到 1440 分钟；调小只是允许更频繁，不代表会真的更频繁。",
         max_actions_per_tick: "一轮里最多做几个公开动作，1 到 5。调大不会放宽间隔，也不会放宽每日上限。",
-        publish_max_daily: "每天最多发几条说说，1 到 10；达到上限后当天不再发。",
+        daily_limits_enabled: "开启时同时执行说说总数、各主题和生活说说的每日上限；关闭后每日次数不限，冷却间隔、内容去重和发布授权仍然生效。",
+        publish_max_daily: "仅在「启用每日次数限制」开启时生效：每天最多发几条说说，1 到 10；达到上限后当天不再发。",
         topic_auto_enabled: "开启后才允许模型在无需人工确认的情况下自行发布；默认关闭，关着时模型提出的主题必须有人确认。",
         topic_require_confirmation: "开启时模型提出的主题必须有人确认才能发布；默认开启，只有上面那项打开且这一项关闭，模型才可能不经过确认就发。",
         topic_prompt_guidance: "给模型的补充表达指引（例如口吻、篇幅、不要写什么）；只影响怎么写，不改主题目录、场景放行与任何授权。",
+        life_publish_enabled: "开启后按下面的间隔与概率把角色自己的生活写成说说；还需要「启用 QQ 空间」和「允许发说说」同时打开，发布时仍会再查一次主题门槛与额度。",
+        life_publish_probability: "每次到点检查时的发布概率，0 到 1 之间；0 表示永不自动发，1 表示每次到点都发。",
+        life_publish_min_interval_hours: "两条成功说说的最短间隔，1 到 168 小时；只按成功发布计算，草稿或已知发布失败不会占满整个间隔。",
+        life_publish_max_daily: "仅在「启用每日次数限制」开启时生效：生活说说每天最多发几条，1 到 10；与「每日说说上限」同时生效时，先撞到哪条算哪条。",
+        life_publish_retry_minutes: "草稿或已知发布失败后，隔多少分钟允许再试，5 到 180；结果未知仍会按更长的间隔等待，避免重复发布。",
+        life_publish_style_prompt: "只影响生活说说的语气与写法（例如更口语、少用感叹号）；不改变主题、授权、间隔与任何事实边界。",
         ...Object.fromEntries(QZONE_TOPIC_SECTIONS.flatMap(({prefix, title, scenes}) => [
           [prefix + "_enabled", "关闭后这个主题的说说一律不发，模型提出的该主题会被拒；不影响其他主题。"],
           [prefix + "_scenes", `这个主题允许出现在哪些场景，用半角逗号分隔，只能填该主题自己的场景：${qzoneSceneWords(scenes)}。留空、重复或写了别的场景会被后端拒绝；多个场景之间没有优先级。`],
           [prefix + "_min_confidence", "主题判定置信度门槛，0 到 1 之间的小数；低于它就不发这一条。「发说说」里由人手动选择的主题按 1 处理。"],
-          [prefix + "_daily_max", "这个主题每天最多发几条，0 到 10；0 表示这个主题今天一条都不发。与「每日说说上限」同时生效时，先撞到哪条算哪条。"],
+          [prefix + "_daily_max", "仅在「启用每日次数限制」开启时生效：这个主题每天最多发几条，0 到 10；0 表示这个主题一条都不发。与「每日说说上限」同时生效时，先撞到哪条算哪条。"],
           [prefix + "_cooldown_minutes", "这个主题两次发布之间的最短间隔，0 到 1440 分钟；0 表示不按主题单独限制间隔。"],
         ])),
       },
@@ -1764,7 +1801,7 @@ window.CompanionConfigEditors = (() => {
     knowledge_scope_invalid: "知识库按会话生效，请选择一个已初始化的私聊对象。",
     knowledge_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     knowledge_settings_invalid: "知识库设置不合法：单轮的引用字符上限不能小于单条素材的字数上限。",
-    role_life_scope_invalid: "日记与梦境按会话生效，请选择一个已初始化的私聊对象。",
+    role_life_scope_invalid: "日记与梦境按角色生效，请先绑定当前角色。",
     role_life_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     rest_gate_settings_invalid: "休息判定设置不合法：判定方式只能选概率或模型，时段格式形如 23:00-08:30。",
     life_timezone_invalid: "请填写有效的 IANA 时区，例如 Asia/Shanghai。",
@@ -1804,12 +1841,15 @@ window.CompanionConfigEditors = (() => {
    * 一次抛错会让**整条面板挂载链**中断：这一页的配置分区没有，后面所有
    * 工作区也全都不会挂上。用户看到的就是「这些页面完全无法使用」。
    * 读不到就返回 null，由调用方渲染等待态，而不是把整页一起带走。 */
+  const INSTALLATION_KINDS = new Set(["proactive.contact", "reaction", "budget", "private_access_installation"]);
+  const groupOnlyUnavailable = (product, kind, override) => !(typeof override === "string" && override.endsWith("/reply/participation"))
+    && product?.roleTarget?.()?.scope_kind === "group" && kind !== "system.prompts"
+    && !INSTALLATION_KINDS.has(kind);
   function endpointFor(product, override = "", kinds = []) {
-    const installationKinds = new Set(["proactive.contact", "reaction", "budget",
-      "private_access_installation"]);
-    if (Array.isArray(kinds) && kinds.some(kind => installationKinds.has(kind))) {
-      return kinds.every(kind => installationKinds.has(kind)) ? PREFIX + "config" : null;
+    if (Array.isArray(kinds) && kinds.some(kind => INSTALLATION_KINDS.has(kind))) {
+      return kinds.every(kind => INSTALLATION_KINDS.has(kind)) ? PREFIX + "config" : null;
     }
+    if (kinds.some(kind => groupOnlyUnavailable(product, kind, override))) return null;
     if (override) return typeof override === "string" && override.startsWith(PREFIX)
       && (override.endsWith("/config") || override.endsWith("/reply/participation")) ? override : null;
     if (!product || typeof product.role !== "function") return null;
@@ -1827,8 +1867,10 @@ window.CompanionConfigEditors = (() => {
   function create(kinds, rootProvider, views = {}, endpointOverride = "") {
     const product = window.CompanionProduct;
     const names = (kinds || []).filter(kind => Object.hasOwn(spec, kind));
-    const endpoint = endpointFor(product, endpointOverride, names);
-    if (!names.length || !endpoint) return null;
+    const unavailableKinds = new Set(names.filter(kind => groupOnlyUnavailable(product, kind, endpointOverride)));
+    const availableNames = names.filter(kind => !unavailableKinds.has(kind));
+    const endpoint = endpointFor(product, endpointOverride, availableNames);
+    if (!names.length || (!endpoint && availableNames.length)) return null;
     if (!window.CompanionWorkbench?.create) return null;
     let rolePeople = [];
     /* One page often owns several configuration groups.  The backend accepts a
@@ -1836,16 +1878,23 @@ window.CompanionConfigEditors = (() => {
        workbench its slice instead of making one request per section.  The
        shared promise is lazy: the first mounted editor starts it, all later
        editors reuse the same response. */
-    const canBatchRead = names.length > 1 && typeof product?.request === "function" && names.every(kind =>
+    const canBatchRead = availableNames.length > 1 && typeof product?.request === "function" && availableNames.every(kind =>
       !spec[kind]?.query && !views?.[kind]?.query);
     let batchRead = null;
     let batchPrimed = false;
     if (canBatchRead) {
-      const sectionNames = names.join(",");
+      const sectionNames = availableNames.join(",");
+      const configBus = endpoint === PREFIX + "config";
       batchRead = () => {
         if (!batchRead.promise) {
+          /* The shared /config route resolves the page's selected target; other
+             endpoints identify their role in the path and reject extra fields. */
+          const selection = configBus ? (product?.selection?.() || {}) : {};
+          const query = {sections: sectionNames,
+            ...(selection.target_id ? {target_id: selection.target_id} : {}),
+            ...(selection.role_id ? {role_id: selection.role_id} : {})};
           batchRead.promise = Promise.resolve(product.request("GET", endpoint,
-            {sections: sectionNames})).then(payload => {
+            query)).then(payload => {
               if (!payload || typeof payload !== "object" || typeof payload.sections !== "object") {
                 throw new Error("batch configuration response is invalid");
               }
@@ -1908,8 +1957,7 @@ window.CompanionConfigEditors = (() => {
          因此归一后的值仍算未保存改动，会在下一次保存时写回规范值。 */
       normalizeDraft: current.normalizeDraft || null,
       order: current.order,
-      /* 卡片右上角的生效范围文案默认由内核按继承链推断；四层组（主动联系偏好，
-         链里多一层关系）必须自己声明，否则会被说成「角色共享」而漏掉关系层。 */
+      /* 补充范围说明；本次保存层由内核按后端字段合同展示。 */
       scopeNote: current.scopeNote || "",
       /* 段落声明同样必须转交：漏传时内核退回单段渲染，分组与依赖说明
          会被静默丢掉——看起来一切正常，只是少了几段。 */
@@ -1928,9 +1976,27 @@ window.CompanionConfigEditors = (() => {
       audit: current.audit || null,
       onStatus: current.onStatus || null,
       endpoint,
+      unavailable: unavailableKinds.has(kind)
+        ? "当前角色只有群聊入口，此设置尚无角色默认接口。请在「账号与会话」配置该角色的私聊入口后使用。" : "",
+      statusRestriction: status => {
+        if (typeof product?.selection !== "function") return "";
+        const fields = status?.fields || {};
+        const fieldNames = Object.keys(fields);
+        const fallbackLayer = status?.scope || status?.layers?.at(-1) || "window";
+        const needsWindow = fieldNames.some(name => {
+          const field = fields[name], layer = field.write_layer || fallbackLayer;
+          return ["window", "relationship"].includes(layer)
+            && (!field.editable_layers?.length || field.editable_layers.includes(layer));
+        }) || (!fieldNames.length && ["window", "relationship"].includes(fallbackLayer));
+        if (!needsWindow) return "";
+        const selected = product.selection();
+        if (!selected?.target_id) return "configuration_window_selection_required";
+        const boundTarget = endpoint?.match(/\/targets\/([^/]+)\/roles\//)?.[1];
+        return boundTarget && boundTarget !== selected.target_id ? "configuration_window_selection_mismatch" : "";
+      },
       /* Multi-section pages share one batched response; a single-section page
          keeps the normal direct read. */
-      prefetch: batchRead ? async () => {
+      prefetch: batchRead && !unavailableKinds.has(kind) ? async () => {
         const payload = await batchRead();
         if (!payload.sections[kind]) throw new Error("batch configuration section is missing");
         return {sections: {[kind]: payload.sections[kind]}};
@@ -1988,6 +2054,9 @@ window.CompanionConfigEditors = (() => {
           .map(instance => instance.refresh()));
       },
       selectSection(id) { for (const instance of instances) instance.selectSection(id); },
+      setVisibleGroups(ids, preferredId) {
+        for (const instance of instances) instance.setVisibleGroups?.(ids, preferredId);
+      },
       saveField(kind, field, value) {
         const instance = instances.find(item => item.group === kind);
         return instance ? instance.saveField(field, value) : Promise.resolve({state: "unavailable"});

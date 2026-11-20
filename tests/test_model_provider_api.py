@@ -88,7 +88,7 @@ async def assert_core_reply_prompt_roundtrip(test, prefix):
     task = next(item for item in listed["data"]["tasks"] if item["kind"] == "conversation.reply")
     test.assertEqual(task["configuration_layer"], "role")
     test.assertEqual(task["execution_path"], "astrbot_core")
-    test.assertEqual(task["editable_fields"], ["prompt"])
+    test.assertEqual(task["editable_fields"], ["prompt", "replacement_rules"])
     test.assertIn("provider", task["core_managed_fields"])
     test.assertNotIn("output_contract", {layer["key"] for layer in task["prompt_layers"]})
     payload = {"kind": task["kind"], "operation_key": "core-prompt-route", "edit_token": task["edit_token"],
@@ -338,6 +338,41 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             "amount": "8.50", "state": "available",
         })
         self.assertNotIn("api_key", str(result).lower())
+
+    async def test_script_balance_status_preserves_the_amount_contract_and_unit(self):
+        from companion_v2.proactive.balance_events import BalanceObservation
+        import astrbot_host.model_api as model_api
+        class Port:
+            provider, provider_label, currency_label = "script", "高级余额查询", "额度"
+            async def fetch(self):
+                return BalanceObservation(Decimal("12.3"), Decimal("16.8"),
+                    datetime(2026, 10, 2, tzinfo=timezone.utc), unit="CNY", used=Decimal("4.5"),
+                    plan_name="Synthetic plan", extra="Management only")
+        (await self.controller.initialize_profile()).unwrap()
+        with patch.object(model_api, "configured_balance_port", return_value=Port()):
+            result = await self.call(PREFIX + "/balance")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["amount"], "12.30")
+        self.assertEqual(result["data"]["currency_label"], "CNY")
+        self.assertEqual(result["data"]["used"], "4.50")
+        self.assertEqual(result["data"]["total"], "16.80")
+        self.assertEqual(result["data"]["plan_name"], "Synthetic plan")
+
+    async def test_script_balance_invalid_account_clears_the_previous_amount(self):
+        from astrbot_host.service_balance_script import BalanceQueryError
+        import astrbot_host.model_api as model_api
+        class Port:
+            provider, provider_label, currency_label = "script", "高级余额查询", "额度"
+            async def fetch(self):
+                raise BalanceQueryError("account_invalid", "Synthetic account expired")
+        (await self.controller.initialize_profile()).unwrap()
+        with patch.object(model_api, "configured_balance_port", return_value=Port()):
+            result = await self.call(PREFIX + "/balance")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertFalse(result["data"]["available"])
+        self.assertIsNone(result["data"]["amount"])
+        self.assertEqual(result["data"]["state"], "account_invalid")
+        self.assertEqual(result["data"]["message"], "Synthetic account expired")
 
     async def test_tts_provider_roundtrip_masks_secrets(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -746,6 +781,22 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             conflict_payload = json.dumps({"revision": "a" * 64, "changes": {"enabled": False}}).encode("utf-8")
             conflict = await self.call(model_api.PREFIX + "/image/output/save", payload=conflict_payload)
             self.assertEqual(conflict["data"]["code"], "model_image_output_conflict")
+
+    async def test_image_output_save_reports_missing_backend_separately(self):
+        (await self.controller.initialize_profile()).unwrap()
+        import astrbot_host.model_api as model_api
+
+        class UnconfiguredImageAPI(FakeImageExtensionAPI):
+            def save_output_configuration(self, revision, changes):
+                error = RuntimeError("native_endpoint_unconfigured")
+                error.code = "native_endpoint_unconfigured"
+                raise error
+
+        with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: UnconfiguredImageAPI()):
+            payload = json.dumps({"revision": "a" * 64, "changes": {"enabled": True}}).encode("utf-8")
+            response = await self.call(model_api.PREFIX + "/image/output/save", payload=payload)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["data"]["code"], "model_image_output_unconfigured")
 
 
 class MultiCoreReplyConfigurationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):

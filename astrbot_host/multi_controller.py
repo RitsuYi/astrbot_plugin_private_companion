@@ -6,14 +6,16 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import sqlite3
 import traceback
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
     HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_peer_id,
-    native_client_connected, persona_instruction, platform_event_matches, supported_platform_name,
-    native_platform_client,
+    native_client_connected, native_platform_client, persona_instruction, platform_event_matches,
+    supported_platform_name, event_session_id, event_native_client,
 )
+from companion_v2.adapters.astrbot.connections import NativeAccountConnections
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
@@ -34,7 +36,8 @@ from .backup_api import guard_restore_startup
 from .storage_location import resolve_data_root, selected_backup_directory
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
 from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
-from .settings import DELIVERY_AUTHORIZATION_TTL, INSTALLATION_PREFIX, PROFILE_PATTERN, HostControlError
+from .settings import (DELIVERY_AUTHORIZATION_TTL, INSTALLATION_PREFIX, PROFILE_PATTERN,
+                       HostControlError, repair_host_policy_sections)
 from .binding import describe_pin, event_identity, is_private_message, message_text, parse_bind_command
 from .calendar_command import receive_calendar_command
 from .binding_store import PendingBinding, binding_path, clear_binding, read_binding, write_binding
@@ -71,6 +74,9 @@ class AstrBotMultiController:
         self.restore_blocked = False
         self.native_extensions = None
         self._accepting = self._terminated = False
+        self._stopped_by_user = False
+        self._account_connections = None
+        self._connection_accounts = ()
         # Lifecycle work may wait on AstrBot; keep that wait out of the lock
         # shared by Dashboard data APIs.
         self._control_lock = asyncio.Lock()
@@ -91,6 +97,26 @@ class AstrBotMultiController:
                                    HostControlError("host_poke_settings_invalid", str(error)))
         from .multi_api import MultiHostWebAPI
         self.web_api = MultiHostWebAPI(self)
+
+    def repair_legacy_config(self) -> dict[str, list[str]]:
+        """Normalize stale optional policy fields once, then refresh settings.
+
+        Called after the plugin installs its config writer.  Keeping this out
+        of ``__init__`` means tests and embedders that never persist config are
+        not surprised by an early write; the method is idempotent and safe to
+        call on every load.
+        """
+        repaired = repair_host_policy_sections(self.config)
+        if not repaired:
+            return {}
+        save = getattr(self, "save_plugin_config", None)
+        if callable(save):
+            try:
+                save(self.config)
+            except Exception:
+                logger.warning("[CompanionV2] 旧策略字段已修复但写回配置失败：%s", repaired, exc_info=True)
+        self.refresh_settings()
+        return repaired
 
     def refresh_settings(self):
         try:
@@ -169,18 +195,47 @@ class AstrBotMultiController:
         self.settings.require_ready()
         return self.settings
 
+    def _connections_for(self, settings=None):
+        settings = settings or self.settings or self._settings()
+        accounts = tuple(settings.accounts)
+        if settings is not self.settings:
+            return NativeAccountConnections(self.context, accounts, now=self.now)
+        if self._account_connections is None or accounts != self._connection_accounts:
+            self._account_connections = NativeAccountConnections(self.context, accounts, now=self.now)
+            self._connection_accounts = accounts
+        return self._account_connections
+
     def startup_readiness(self):
-        """Return a retryable readiness code until every configured Bot is online."""
-        for account in self._settings().accounts:
-            platform = self.context.get_platform_inst(account.platform_id)
-            if platform is None:
-                return "host_platform_unavailable"
-            meta = platform.meta()
-            if not supported_platform_name(meta.name) or meta.id != account.platform_id:
-                return "host_platform_changed"
-            if not native_client_connected(platform, account.self_id):
-                return "host_account_unavailable"
+        """Validate shared configuration; unavailable accounts wait independently."""
+        self._settings()
+        self._connections_for().refresh()
         return None
+
+    async def recover_accounts(self):
+        session = self.session
+        if (not self._terminated and not self._stopped_by_user and self._accepting
+                and session is not None and session.application.state == "running"):
+            await session.account_recovery.refresh()
+
+    def native_bridges_current(self):
+        """Whether both running bridges still use their original native clients."""
+        session = self.session
+        if session is None or session.application.state != "running":
+            return False
+        snapshots = getattr(session, "native_bridge_pairs", ())
+        if len(snapshots) != 2:
+            return False
+        for platforms in snapshots:
+            if not platforms:
+                return False
+            for platform_id, (platform, client) in platforms.items():
+                try:
+                    current = self.context.get_platform_inst(platform_id)
+                    if current is not platform or native_platform_client(current) is not client:
+                        return False
+                except Exception:
+                    return False
+        return True
 
     @property
     def profile_root(self):
@@ -561,7 +616,8 @@ class AstrBotMultiController:
                   str(error) if code.split("__", 1)[0] == "host_native_lookup_timeout"
                   or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable",
                               "backup_restore_rollback_incomplete", "backup_restore_journal_unreadable",
-                              "backup_restore_startup_blocked", "setup_binding_missing") else
+                              "backup_restore_startup_blocked", "setup_binding_missing",
+                              "host_account_unavailable", "host_platform_unavailable") else
                   "shared host configuration, native route or authority could not be verified")
         if code == "host_control_failed":
             # 把“在哪一层炸的”带回来：只有位置，不含任何配置值或会话内容。
@@ -578,7 +634,7 @@ class AstrBotMultiController:
         return Outcome.failed(code, reason)
 
     async def _probe(self, settings=None, *, include_conversations=True, include_window_personas=True,
-                     allow_unavailable_model=False):
+                     allow_unavailable_model=False, allow_unavailable_accounts=True):
         settings = settings or self._settings()
         personas = []
         for mapping in settings.personas:
@@ -591,23 +647,42 @@ class AstrBotMultiController:
         bridge = NativePrivateBridge(self.context, version=self.native_types.version, event_type=self.native_types.event,
             installation_id=settings.installation_id, host_id=HOST_ID, identities=None,
             accounts=settings.accounts, personas=tuple(personas), now=self.now,
+            connection_manager=self._connections_for(settings),
             session_persona_override_lookup=self.native_types.session_persona_override_lookup,
             persona_snapshot_lookup=self.native_types.persona_snapshot_lookup,
-            persona_selection_lookup=self.native_types.persona_selection_lookup)
+            persona_selection_lookup=self.native_types.persona_selection_lookup,
+            private_session_lookup=self.session_topology.private_session_id)
         conversations = {}
+        available = set()
         for account in settings.accounts:
-            platform = self.context.get_platform_inst(account.platform_id)
-            client = bridge.platforms[account.platform_id][1]
-            if (platform is None or native_platform_client(platform) is not client
-                    or not bridge.account_connected(account, client)):
-                raise TaskError("host_account_unavailable", "a configured account is not connected")
+            try:
+                bridge.connections.acquire(account)
+            except TaskError as error:
+                if allow_unavailable_accounts:
+                    continue
+                platform = self.context.get_platform_inst(account.platform_id)
+                logger.warning("[CompanionV2] 账号校验未通过 platform=%r account=%r client_present=%s code=%s",
+                               account.platform_id, account.self_id,
+                               platform is not None and native_platform_client(platform) is not None, error.code)
+                raise TaskError("host_account_unavailable",
+                    f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
+                    "请确认这个账号已登录，再重试初始化。") from error
+            available.add((account.platform_id, account.self_id))
         for target in (settings.all_targets if include_conversations else ()):
+            if (target.platform_id, target.account_id) not in available:
+                continue
             account = bridge.accounts[(target.platform_id, target.account_id)]
             peer = target.participant_id if hasattr(target, "participant_id") else target.group_id
             if peer == "*":
                 continue
             if target in settings.targets:
-                umo = bridge._umo(target.platform_id, target.participant_id)
+                try:
+                    session_id = bridge.private_session_id(account, target.participant_id)
+                except TaskError as error:
+                    if error.code == "host_native_session_unavailable":
+                        continue
+                    raise
+                umo = bridge._umo(target.platform_id, session_id)
                 # Global profile preparation provisions every configured role; the window
                 # persona is resolved later for live input admission.
                 conversation_manager = self.context.conversation_manager
@@ -619,6 +694,7 @@ class AstrBotMultiController:
                     raise TaskError("host_conversation_changed", "host conversation changed during startup probe")
                 conversations[target.target_id] = {
                     "target": target, "conversation_id": bridge._conversation_key(umo, conversation_id),
+                    "session_id": session_id,
                     "role_ids": tuple(sorted({item.role_id for item in settings.personas if item.bot_id == target.bot_id})),
                 }
             # Groups resolve the actual event's UMO, including member sessions,
@@ -633,6 +709,8 @@ class AstrBotMultiController:
                 and any(target.participant_id == "*" for target in settings.targets)):
             inventory = [row for row in persona_inventory if row.get("scope_kind") == "private"]
             for window in inventory:
+                if (window.get("platform_id"), window.get("account_id")) not in available:
+                    continue
                 if window.get("native") is not True or window.get("scope_kind") != "private":
                     continue
                 target = settings.private_target(window.get("platform_id"), window.get("account_id"),
@@ -645,6 +723,8 @@ class AstrBotMultiController:
                 conversations[target.target_id] = {
                     "target": target,
                     "conversation_id": bridge._conversation_key(window["unified_msg_origin"], window.get("conversation_id")),
+                    "session_id": bridge.private_session_id(bridge.accounts[(target.platform_id, target.account_id)],
+                                                            target.participant_id),
                     "role_ids": (mapping.role_id,),
                 }
         provider_id = settings.common.provider_id
@@ -727,8 +807,21 @@ class AstrBotMultiController:
         except BaseException:
             runtime.close()
             raise
-        return runtime, MultiAuthority(runtime, settings, now=self.now,
-            platform_name=self._configured_platform_name), last_restore
+        authority = MultiAuthority(runtime, settings, now=self.now,
+            platform_name=self._configured_platform_name,
+            private_session_lookup=self._configured_private_session)
+        parked = self._parked_binding()
+        core_target = self._core_target(parked) if parked is not None else None
+        authority.core_target_id = core_target.target_id if core_target is not None else None
+        return runtime, authority, last_restore
+
+    def _configured_private_session(self, platform_id, account_id, participant_id):
+        session = self.session
+        if session is not None:
+            cached = session.bridge._private_sessions.get((platform_id, account_id, participant_id))
+            if cached is not None:
+                return cached
+        return self.session_topology.private_session_id(platform_id, account_id, participant_id)
 
     def _configured_platform_name(self, platform_id):
         platform = self.context.get_platform_inst(platform_id)
@@ -763,14 +856,16 @@ class AstrBotMultiController:
                 source_priority=search_settings.source_priority())
         self.session = MultiHostSession(self.runtime, self.context, settings=self.settings, personas=personas,
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
+            connection_manager=self._connections_for(),
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
             persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
             persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
+            private_session_lookup=self.session_topology.private_session_id,
             news_port=configured_news_port(self.config, context=self.context,
                 deepseek_provider_resolver=search_provider_resolver,
                 search_priority_resolver=search_settings.source_priority),
             search_port_factory=search_port_factory,
-            balance_port=configured_balance_port(self.config),
+            balance_port=configured_balance_port(self.config, context=self.context),
             weather_ports=configured_weather_ports(self.config),
             qzone_transport=build_qzone_transport(self.context, data_root=self.data_root),
             solar_term_port=configured_solar_term_port(
@@ -834,7 +929,7 @@ class AstrBotMultiController:
             except Exception as error:
                 return self._failure(error, operation="probe")
 
-    async def initialize_profile(self):
+    async def initialize_profile(self, *, automatic=False):
         async with self._lifecycle_lock:
             try:
                 self.refresh_settings()
@@ -844,7 +939,7 @@ class AstrBotMultiController:
                     raise TaskError("setup_binding_missing",
                         "还没有可加载的 Bot 账号与人格：请先在「账号与会话」绑定窗口并保存角色映射，"
                         "再回来初始化。")
-                manifest, conversations = await self._probe()
+                manifest, conversations = await self._probe(include_conversations=not automatic)
                 previous_session = self.session
                 restore_running = bool(previous_session is not None
                     and previous_session.application.state == "running")
@@ -872,13 +967,32 @@ class AstrBotMultiController:
 
     async def _initialize_manifest_locked(self, manifest, conversations):
         await self._open_async()
-        receipt = await asyncio.to_thread(self._initialize_manifest_storage, manifest, conversations)
+        try:
+            receipt = await asyncio.to_thread(self._initialize_manifest_storage, manifest, conversations)
+        except sqlite3.OperationalError as error:
+            if "unable to open database file" not in str(error).lower():
+                raise
+            # The connection was opened before its profile directory or database
+            # file disappeared (an operator may have removed the runtime while the
+            # plugin kept running). Reopen once from the configured root instead of
+            # surfacing an opaque SQLite error on the initialization page.
+            old_runtime = self.runtime
+            path = str(getattr(old_runtime, "database_path", "") or "")
+            logger.warning("[CompanionV2] 运行库无法写入，重新打开存储后重试初始化 path=%s", path)
+            if old_runtime is not None:
+                old_runtime.close()
+            self.runtime = self.authority = None
+            await self._open_async()
+            receipt = await asyncio.to_thread(self._initialize_manifest_storage, manifest, conversations)
         await self._assemble(manifest)
         return receipt
 
     def _initialize_manifest_storage(self, manifest, conversations):
         with self.runtime.transaction():
             receipt = self.authority.initialize(manifest, allow_legacy_staging=self._adopting_legacy_profile)
+            parked = self._parked_binding()
+            core_target = self._core_target(parked) if parked is not None else None
+            core_target_id = core_target.target_id if core_target is not None else None
             for conversation in conversations.values():
                 target = conversation["target"]
                 for role_id in conversation["role_ids"]:
@@ -886,8 +1000,9 @@ class AstrBotMultiController:
                     from companion_v2.foundation.refs import ScopeKind, ScopeRef
                     scope = ScopeRef(self.settings.installation_id, target.platform_id, ScopeKind.PRIVATE,
                         target.participant_id, target.bot_id, target.account_id,
-                        persona_conversation(conversation["conversation_id"], role), target.participant_id)
-                    self.authority.provision_scope(target, scope, role)
+                        persona_conversation(conversation["conversation_id"], role), conversation["session_id"])
+                    self.authority.provision_scope(target, scope, role,
+                        core_admin=core_target_id == target.target_id)
         return receipt
 
     async def apply_bindings(self, candidate, *, expected_config=None):
@@ -925,7 +1040,7 @@ class AstrBotMultiController:
                 if not callable(save):
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
             manifest, _ = await self._probe(settings, include_conversations=False,
-                                            allow_unavailable_model=True)
+                                            allow_unavailable_model=True, allow_unavailable_accounts=False)
             model_issue = manifest.pop("_model_issue", None)
             async with self._control_lock:
                 if self._terminated:
@@ -984,7 +1099,8 @@ class AstrBotMultiController:
                 try:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
-                            platform_name=self._configured_platform_name)
+                            platform_name=self._configured_platform_name,
+                            private_session_lookup=self._configured_private_session)
                         with self.runtime.transaction():
                             authority.initialize(manifest, reviewed=True,
                                                  allow_legacy_staging=adopting_legacy_profile)
@@ -1002,6 +1118,8 @@ class AstrBotMultiController:
                     await self.native_extensions.aclose()
                     self.native_extensions = None
                 self.session = self.last_session = None
+                self._account_connections = None
+                self._connection_accounts = ()
                 self.refresh_settings()
                 self._accepting = False
                 self.last_failure = None
@@ -1049,6 +1167,11 @@ class AstrBotMultiController:
                     try:
                         await asyncio.to_thread(self.authority.require_manifest, probed)
                     except TaskError as error:
+                        if error.code == "host_not_initialized":
+                            # A runtime database from a direct upgrade can exist
+                            # without a shared manifest. Let the caller take the
+                            # explicit initialize path instead of aborting startup.
+                            return Outcome.success({"loaded": False, "started": False})
                         if error.code != "host_binding_changed":
                             raise
                         saved = self.authority.require_manifest()
@@ -1115,18 +1238,58 @@ class AstrBotMultiController:
         logger.info("[CompanionV2] 已按开始使用中确认的核心管理员窗口更新账号与角色绑定")
         return receipt
 
-    async def start(self):
+    async def start(self, *, automatic=False):
         async with self._lifecycle_lock:
             try:
+                if automatic and self._stopped_by_user:
+                    return Outcome.failed("host_manually_stopped", "the operator stopped this host")
+                self._stopped_by_user = False
                 if self.session is not None and self.session.application.state == "running":
-                    return Outcome.success({"state": "running", "replayed": True})
+                    if self._accepting and self.native_bridges_current():
+                        return Outcome.success({"state": "running", "replayed": True})
+                    previous_session = self.session
+                    self._accepting = False
+                    self.refresh_settings()
+                    self._settings()
+                    manifest, _ = await self._probe(include_conversations=False, include_window_personas=False)
+                    for platform_id, (platform, client) in previous_session.native_bridge_pairs[0].items():
+                        current = self.context.get_platform_inst(platform_id)
+                        if current is platform and native_platform_client(current) is client:
+                            continue
+                        for account in self.settings.accounts:
+                            if account.platform_id != platform_id:
+                                continue
+                            try:
+                                self._connections_for().acquire(account)
+                            except TaskError as error:
+                                raise TaskError("host_account_unavailable",
+                                                "the original account has not reconnected yet") from error
+                    async with self._control_lock:
+                        if self.session is not previous_session or self._terminated:
+                            raise TaskError("host_session_changed", "the shared host changed during native reconnect")
+                        await self._open_async()
+                        try:
+                            await asyncio.to_thread(self.authority.require_manifest, manifest)
+                        except TaskError as error:
+                            if error.code == "host_binding_changed" and self._confirmed_core_window():
+                                await asyncio.to_thread(self._adopt_confirmed_mapping, manifest)
+                            else:
+                                raise
+                    report = await previous_session.close(grace_seconds=0.5)
+                    if report.state != "stopped":
+                        raise TaskError("host_must_stop", "the shared host did not finish stopping after native reconnect")
+                    async with self._control_lock:
+                        if self.session is not previous_session:
+                            raise TaskError("host_session_changed", "the shared host changed during native reconnect")
+                        self.last_session, self.session = previous_session, None
+                    logger.info("[CompanionV2] 平台连接已更新，重建私聊与群聊 Bridge")
                 self._idle()
                 # Model settings can be changed from another workspace while
                 # this host is stopped. Re-read them here so retrying Start
                 # uses the newly selected provider without re-saving mappings.
                 self.refresh_settings()
                 self._settings()
-                manifest, conversations = await self._probe()
+                manifest, conversations = await self._probe(include_conversations=False)
                 async with self._control_lock:
                     if self._terminated:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
@@ -1160,14 +1323,20 @@ class AstrBotMultiController:
             self._settings()
             if self.session is not session:
                 raise TaskError("host_session_changed", "the initialized host changed before it could resume")
+            readiness = self.startup_readiness()
+            if readiness is not None:
+                raise TaskError(readiness, "a configured native account disconnected during startup")
+            if not self.native_bridges_current():
+                raise TaskError("host_account_changed", "native platform/client changed during startup")
             self._accepting, self.last_failure = True, None
             targets = len(self.settings.all_targets)
         return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
         task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
-        model = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?",
-                                      ("model_gateway",))
+        configuration = getattr(getattr(self.session, "application", None), "configuration", None)
+        model = (configuration.store if configuration is not None else self.runtime).read_one(
+            "SELECT generation FROM configuration_consumers WHERE consumer_id = ?", ("model_gateway",))
         return task, model
 
     def target_for_event(self, event, *, connected=True):
@@ -1188,17 +1357,18 @@ class AstrBotMultiController:
                 route = group_event_route(event)
                 target = self.settings.group_target(route.platform_id, route.account_id, route.group_id)
                 platform = self.context.get_platform_inst(meta.id)
-                if (target is None or platform is None or platform.get_client() is not event.bot
+                if (target is None or platform is None or not platform_event_matches(platform, event)
                         or (connected and not native_client_connected(
-                            platform, route.account_id, event.bot))):
+                            platform, route.account_id, event_native_client(platform, event)))):
                     return None
                 return target
             sender, login = event_peer_id(event), event_account_id(event)
+            session_id = event_session_id(event)
             if (message.group_id or getattr(message.type, "value", None) != "FriendMessage"
                     or getattr(session.message_type, "value", None) != "FriendMessage"
                     or not supported_platform_name(meta.name) or session.platform_id != meta.id
-                    or session.platform_name != meta.id or session.session_id != sender
-                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
+                    or session.platform_name != meta.id or session.session_id != session_id
+                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{session_id}"):
                 return None
             target = self.settings.private_target(meta.id, login, sender)
             platform = self.context.get_platform_inst(meta.id)
@@ -1222,7 +1392,7 @@ class AstrBotMultiController:
             native_scope_id = route.session_id
         else:
             bridge = session.bridge
-            native_scope_id = target.participant_id
+            native_scope_id = event_session_id(event)
         account = bridge.accounts.get((target.platform_id, target.account_id))
         if account is None or account.bot_id != target.bot_id:
             return None
@@ -1496,26 +1666,6 @@ class AstrBotMultiController:
             except Exception as error:
                 return self._failure(error)
 
-    async def _group_delivery_control(self, target_id, *, authorize):
-        async with self._control_lock:
-            try:
-                self._settings()
-                if self.authority is None:
-                    raise TaskError("host_not_initialized", "initialize the shared installation first")
-                self.authority.require_manifest()
-                groups = self.authority.group_delivery
-                result = (groups.authorize(target_id, self.now() + DELIVERY_AUTHORIZATION_TTL) if authorize
-                          else groups.revoke(target_id))
-                return Outcome.success(result)
-            except Exception as error:
-                return self._failure(error)
-
-    async def authorize_group_delivery(self, target_id):
-        return await self._group_delivery_control(target_id, authorize=True)
-
-    async def revoke_group_delivery(self, target_id):
-        return await self._group_delivery_control(target_id, authorize=False)
-
     def preview(self, target_id, batch_id):
         try:
             self._settings()
@@ -1584,6 +1734,7 @@ class AstrBotMultiController:
                 return self._failure(error)
 
     async def stop(self, *, grace_seconds=0.5):
+        self._stopped_by_user = True
         self._accepting = False
         async with self._lifecycle_lock:
             self._accepting = False
@@ -1614,6 +1765,8 @@ class AstrBotMultiController:
                 "failure_code": session.application.failure_code if session else None,
                 "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
+                "account_connections": (session.account_recovery.statuses() if session is not None else
+                    self._connections_for().refresh() if self.settings is not None and self.settings.accounts else []),
                 # Why the store was or was not opened. ``restore_state.blocking`` is
                 # the startup gate; the detail names the journal and never contains
                 # credentials or snapshot bytes.

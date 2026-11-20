@@ -14,7 +14,7 @@ from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 
-from .contract import contract_of, layers_of, provenance_of
+from .contract import contract_of, definitions_of, layers_of, provenance_of
 
 from ..conversation.media.quota import (GROUP as QUOTA_GROUP, OWNER as QUOTA_OWNER,
     configuration_fields as quota_fields)
@@ -139,14 +139,23 @@ class GroupEditor:
         if target_layer is ConfigLayer.WINDOW:
             # A window-scoped group belongs to one original participant; the
             # binding is re-read here so a stale page cannot write to a new role.
-            if context.scope.kind is not ScopeKind.PRIVATE or context.audience.recipients != (context.actor.subject,):
-                raise TaskError(self._code("scope_invalid"), "select one original private participant")
-            current = require(self.app.tasks.identity.resolve_authenticated(context.actor.principal, observed_at=now))
-            binding = require(self.app.tasks.identity.resolve_role(context.scope, observed_at=now))
-            if (current.subject != context.actor.subject or current.binding_id != context.actor.binding_id
-                    or current.binding_revision != context.actor.binding_revision or binding != context.role_binding):
-                raise TaskError(self._code("target_changed"), "the selected participant or role binding changed")
-            self.app.tasks._context(context, now)
+            if (getattr(context, "management_scope", "") == "group"
+                    and context.scope.kind is ScopeKind.GROUP):
+                # The group management API builds this context from the selected
+                # configured group and verifies its route before the editor runs.
+                # Re-resolve the binding only when the group already has one.
+                binding = self.app.tasks.identity.resolve_role(context.scope, observed_at=now)
+                if binding.is_success and binding.unwrap() != context.role_binding:
+                    raise TaskError(self._code("target_changed"), "the group role binding changed")
+            else:
+                if context.scope.kind is not ScopeKind.PRIVATE or context.audience.recipients != (context.actor.subject,):
+                    raise TaskError(self._code("scope_invalid"), "select one original private participant")
+                current = require(self.app.tasks.identity.resolve_authenticated(context.actor.principal, observed_at=now))
+                binding = require(self.app.tasks.identity.resolve_role(context.scope, observed_at=now))
+                if (current.subject != context.actor.subject or current.binding_id != context.actor.binding_id
+                        or current.binding_revision != context.actor.binding_revision or binding != context.role_binding):
+                    raise TaskError(self._code("target_changed"), "the selected participant or role binding changed")
+                self.app.tasks._context(context, now)
         target = self._target()
         scope = (target.authorization_scope if target_layer is ConfigLayer.INSTALLATION else
                  target.scope if target.scope is not None else context.scope)
@@ -159,10 +168,7 @@ class GroupEditor:
         return {key.removeprefix(prefix): value for key, value in snapshot.values.items() if key.startswith(prefix)}
 
     def _definitions(self):
-        prefix = self.group + "."
-        return {field.field_id.removeprefix(prefix): field
-                for field in self.app.configuration.registry.group(self.group)
-                if field.field_id.startswith(prefix)}
+        return definitions_of(self.app.configuration.registry, self.group)
 
     def _layers(self):
         """The inheritance chain this editor writes into, outermost first.
@@ -234,6 +240,16 @@ class GroupEditor:
                 raise TaskError(error.code, str(error)) from error
             result = {"replayed": receipt.replayed, "operation_id": op_id}
             self._after_configure(operator, data, result)
+        # Mint the next token after the write transaction has committed, so the
+        # editor does not pay for a second full section projection and the write
+        # lock is released first.  A failed token read is a slow-path fallback,
+        # not a failed save.
+        try:
+            snapshot = require(self.app.configuration.read(
+                operator, target=target, group_id=self.group, observed_at=self.app.now()))
+            result["edit_token"] = snapshot.edit_token
+        except (TaskError, ConfigurationError):
+            result["edit_token"] = ""
         self.app.notify()
         return result
 
@@ -391,7 +407,7 @@ class PrivateAcquaintanceSettingsMixin:
     @outcome
     def status(self, operator):
         result = require(super().status(operator))
-        legacy = legacy_person_window_snapshot(self.runtime, self.context)
+        legacy = legacy_person_window_snapshot(self.app.configuration.store, self.context)
         if self.group == PERSON_GROUP:
             role_target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.ROLE,
                 self.context.role_binding.role, bot_id=self.context.scope.bot_id)
@@ -418,7 +434,7 @@ class PrivateAcquaintanceSettingsMixin:
 
     @outcome
     def configure(self, operator, data):
-        with self.runtime.transaction():
+        with self.app.configuration.store.transaction():
             status = require(self.status(operator))
             if type(data) is not dict or data.get("edit_token") != status["edit_token"]:
                 raise TaskError("configuration_revision_conflict",
@@ -430,7 +446,7 @@ class PrivateAcquaintanceSettingsMixin:
                                  if name in self.legacy_fields)
             if legacy_reset:
                 from companion_v2.configuration.owners import SparseConfigurationOwner
-                legacy = legacy_person_window_snapshot(self.runtime, self.context)
+                legacy = legacy_person_window_snapshot(self.app.configuration.store, self.context)
                 SparseConfigurationOwner(self.runtime).write(
                     legacy_person_window_target_for(self.context), legacy_person_window_fields(),
                     changes={}, reset=legacy_reset, expected_revision=legacy.revision,
@@ -754,6 +770,9 @@ class WardrobeManagement(GroupEditor):
     layers = wardrobe_fields()[0].layers
     error_prefix = "wardrobe"
 
+    def _target(self):
+        return self.app.wardrobe_settings.target(self.context)
+
 
 class ReferenceManagement(GroupEditor):
     """Reference material for one role, and the daily-outfit path it feeds.
@@ -769,6 +788,9 @@ class ReferenceManagement(GroupEditor):
     group, owner = REFERENCE_GROUP, REFERENCE_OWNER
     layers = reference_fields()[0].layers
     error_prefix = "reference"
+
+    def _target(self):
+        return self.app.reference_settings.target(self.context)
 
 
 class ProactiveContactManagement(GroupEditor):

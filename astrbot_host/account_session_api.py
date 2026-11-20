@@ -10,11 +10,11 @@ import logging
 from astrbot.api.web import request
 from astrbot.core import sp
 
-from companion_v2.adapters.astrbot.native import route_id
+from companion_v2.adapters.astrbot.native import native_client_connected, native_platform_client, route_id
 from companion_v2.execution.models import TaskError, digest
 from .multi_settings import MultiHostSettings
 from .native import remember_session_settings
-from .settings import HostControlError
+from .settings import HostControlError, repair_host_policy_sections
 from .bootstrap_provider import (resolve_bootstrap_provider, supported_text_provider,
                                  text_provider_catalog, text_provider_predicate)
 
@@ -97,7 +97,12 @@ class AccountSessionWebAPI:
         try:
             # Reading through the same parser as the runtime keeps a persona that
             # is shared by several Bot accounts on one role id in the editor too.
-            personas = [asdict(mapping) for mapping in MultiHostSettings.parse(controller.config).personas]
+            # The controller already holds the parsed settings; only reparse when
+            # the host has not assembled them yet.
+            parsed = controller.settings
+            if parsed is None or not hasattr(parsed, "personas"):
+                parsed = MultiHostSettings.parse(controller.config)
+            personas = [asdict(mapping) for mapping in parsed.personas]
         except (HostControlError, ValueError):
             pass
         enabled = bool(section.get("enabled", False))
@@ -117,7 +122,28 @@ class AccountSessionWebAPI:
             code = data.get("code") or response.get("message") or "setup_targets_unavailable"
             reason = response.get("reason") or "the native session directory could not be read"
             raise TaskError(code, reason)
-        return response["data"]
+        discovered = deepcopy(response["data"])
+        lookup = getattr(getattr(self.controller, "context", None), "get_platform_inst", None)
+        if callable(lookup):
+            for row in discovered.get("accounts", []):
+                row["connection_status"] = self._connection_status(lookup, row)
+        return discovered
+
+    @staticmethod
+    def _connection_status(lookup, account):
+        # Read adapter-owned objects only; no login, transport call or runtime
+        # mutation. These hints explain a refusal, never authorize a save.
+        try:
+            platform = lookup(account["platform_id"])
+            if platform is None:
+                return "platform_unavailable"
+            client = native_platform_client(platform)
+            if client is None:
+                return "client_unavailable"
+            return ("ready" if native_client_connected(platform, account["account_id"], client)
+                    else "account_unavailable")
+        except Exception:
+            return "unknown"
 
     async def get(self):
         try:
@@ -613,8 +639,13 @@ class AccountSessionWebAPI:
             section.update(enabled=enabled, accounts=[{"platform_id": key[0], "account_id": key[1], "bot_id": key[2]}
                                                       for key in sorted(selected)],
                            targets=private, personas=mapped, group_targets=group_rows)
+            repaired = repair_host_policy_sections(candidate)
+            if repaired:
+                logger.warning("[CompanionV2] 保存角色映射时自动修复旧策略字段：%s", repaired)
             MultiHostSettings.parse(candidate)
             result = await controller.apply_bindings(candidate)
+            if repaired:
+                result["repaired_settings"] = repaired
             try:
                 discovered = await self._discovered()
             except (TaskError, HostControlError):

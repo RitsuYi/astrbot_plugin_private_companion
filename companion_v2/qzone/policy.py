@@ -42,6 +42,7 @@ class QzoneRuntimeState:
     topic_publish_day: dict = field(default_factory=dict)
     topic_publish_count: dict = field(default_factory=dict)
     recent_publish_texts: tuple = ()
+    recent_publish_media: tuple = ()
 
     @classmethod
     def restore(cls, value):
@@ -64,7 +65,9 @@ class QzoneRuntimeState:
                    topic_publish_count={str(key): int(item or 0) for key, item in
                                         dict(value.get("topic_publish_count") or {}).items()},
                    recent_publish_texts=tuple(str(item)[:400] for item in
-                                               (value.get("recent_publish_texts") or ()))[:RECENT_PUBLISH_TEXTS])
+                                               (value.get("recent_publish_texts") or ()))[:RECENT_PUBLISH_TEXTS],
+                   recent_publish_media=tuple(str(item) for item in
+                                              (value.get("recent_publish_media") or ()))[-RECENT_PUBLISH_TEXTS:])
 
     def document(self):
         return asdict(self)
@@ -122,7 +125,8 @@ def action_reason(state, settings, *, kind, at, day):
     if kind == "publish":
         if not settings.get("publish_enabled"):
             return "发空间未开启"
-        if state.publish_day == day and state.publish_count >= int(settings.get("publish_max_daily") or 1):
+        if (settings.get("daily_limits_enabled", True) and state.publish_day == day
+                and state.publish_count >= int(settings.get("publish_max_daily") or 1)):
             return "今天的说说已经发过了"
     last = _moment(state.last_action_at.get(kind))
     gap = timedelta(minutes=int(settings.get("action_min_interval_minutes") or 30))
@@ -204,7 +208,8 @@ def topic_reason(state, settings, *, topic, scene, confidence, topic_confirmed, 
         daily_max = int(settings.get(f"{topic_key}_daily_max", settings.get("publish_max_daily") or 1))
     except (TypeError, ValueError):
         daily_max = 1
-    if topic_day == day and state.topic_publish_count.get(topic_key, 0) >= daily_max:
+    daily_count = state.topic_publish_count.get(topic_key, 0) if topic_day == day else 0
+    if settings.get("daily_limits_enabled", True) and daily_count >= daily_max:
         return "qzone_topic_daily_limit", "这个主题今天的发布额度已经用完"
     last = _moment(state.topic_last_action_at.get(topic_key))
     try:
@@ -218,7 +223,7 @@ def topic_reason(state, settings, *, topic, scene, confidence, topic_confirmed, 
 
 
 def publish_reason(state, settings, *, text, at, day, topic=None, scene=None,
-                   confidence=None, topic_confirmed=True):
+                   confidence=None, topic_confirmed=True, media_key=""):
     """Everything that must be true before a post: enablement, cap, spacing, novelty."""
     reason = action_reason(state, settings, kind="publish", at=at, day=day)
     if reason:
@@ -229,6 +234,8 @@ def publish_reason(state, settings, *, text, at, day, topic=None, scene=None,
                                       at=at, day=day)
         if reason:
             return reason
+    if media_key:
+        return "这条说说和刚发过的图文重复" if media_key in state.recent_publish_media else ""
     compact = "".join(str(text or "").split())
     if not compact:
         return "说说正文是空的"
@@ -240,11 +247,13 @@ def publish_reason(state, settings, *, text, at, day, topic=None, scene=None,
     return ""
 
 
-def note_publish(state, *, text, at, day, topic=None):
-    recent = tuple([*state.recent_publish_texts, str(text)[:400]])[-RECENT_PUBLISH_TEXTS:]
+def note_publish(state, *, text, at, day, topic=None, media_key=""):
+    recent = state.recent_publish_texts if media_key else tuple([*state.recent_publish_texts, str(text)[:400]])[-RECENT_PUBLISH_TEXTS:]
     count = state.publish_count + 1 if state.publish_day == day else 1
     changes = dict(recent_publish_texts=recent, publish_day=day, publish_count=count,
                    last_action_at={**state.last_action_at, "publish": stamp(at)})
+    if media_key:
+        changes["recent_publish_media"] = (*state.recent_publish_media, media_key)[-RECENT_PUBLISH_TEXTS:]
     if topic is not None:
         topic_key = normalize_topic(topic).value
         topic_day = dict(state.topic_publish_day)

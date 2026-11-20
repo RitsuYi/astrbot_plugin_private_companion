@@ -11,6 +11,8 @@ from . import codec
 from .models import text
 from .tools import PROPOSAL_PROPERTIES, decode_proposal
 
+MAX_REFLECTION_PROPOSALS = 16
+
 
 DETAIL_FIELDS = tuple(k for k in PROPOSAL_PROPERTIES if k not in (
     "operation", "evidence_handles", "predicate", "object", "representation",
@@ -26,7 +28,7 @@ def object_schema(properties):
 # supplies identities, operation keys, namespaces and the default policy values.
 REFLECTION_SCHEMA = object_schema({
     "summary": {"type": "string"},
-    "proposals": {"type": "array", "items": object_schema({
+    "proposals": {"type": "array", "maxItems": MAX_REFLECTION_PROPOSALS, "items": object_schema({
         "item_id": {"type": ["string", "null"]},
         "operation": {"type": "string", "enum": ["add", "correct", "retract", "no_op"]},
         "evidence_handles": {"type": "array", "items": {"type": "string"}},
@@ -126,7 +128,7 @@ def parse_output(raw):
         text(result["summary"], "summary", 8192, empty=True)
     except ValueError:
         raise OutputProblem("invalid_summary", "$.summary") from None
-    if type(result["proposals"]) is not list or len(result["proposals"]) > 32:
+    if type(result["proposals"]) is not list or len(result["proposals"]) > MAX_REFLECTION_PROPOSALS:
         raise OutputProblem("invalid_proposals", "$.proposals")
     decisions = result.get("pending_decisions", [])
     if type(decisions) is not list or len(decisions) > 32:
@@ -214,6 +216,12 @@ def _coerce_soft_details(data):
             data.pop("single_value", None)
         else:
             data["single_value"] = folded
+    value = data.get("stability_estimate")
+    if value is not None and not isinstance(value, str):
+        # The model often emits a numeric stability estimate even though the
+        # memory contract stores text.  Normalize it instead of rejecting the
+        # whole proposal as invalid_proposal.
+        data["stability_estimate"] = str(value)
     for name in ("valid_from", "valid_to"):
         value = data.get(name)
         if value is None:
@@ -251,6 +259,11 @@ def normalize_proposal(raw, manifest):
             data[field] = value
     if "target" in data:
         alias = data.pop("target")
+        # no_op means "this fact is already recorded"; models naturally include
+        # the target handle.  The contract forbids it, but rejecting the whole
+        # proposal produces a partial batch and stalls the remaining sources.
+        if data.get("operation") == "no_op":
+            alias = None
         if alias is not None:
             if type(alias) is not str or alias not in manifest.get("fact_handles", {}):
                 raise OutputProblem("unknown_target", "target")

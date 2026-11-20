@@ -37,7 +37,38 @@ PREFIX = "/astrbot_plugin_private_companion/setup"
 PROFILE_BODY_LIMIT = 262144
 logger = logging.getLogger(__name__)
 
+ROUTE_REJECTION_LABELS = {
+    "contact_delivery_budget": "该账号的主动联系额度已用尽",
+    "proactive_disabled": "该账号或联系目的未启用主动联系",
+    "proactive_paused": "该账号或联系目的处于暂停期",
+    "proactive_quiet_hours": "该账号处于免打扰时段",
+    "account_link_transport_unavailable": "该账号的平台连接不可用",
+    "account_link_route_changed": "关联关系、角色或路由策略已变化",
+    "account_link_context_unavailable": "无法解析该账号的有效会话身份",
+    "account_link_weight_zero": "该账号的随机权重为 0",
+    "delivery_not_sent": "平台明确未发送",
+}
+
+
+def _diagnostic_route_failure(observation):
+    rejections = observation.get("route_rejections") or []
+    if not rejections:
+        return None
+    details = []
+    for item in rejections:
+        member = item.get("member") or {}
+        code = item.get("code") or "account_link_context_unavailable"
+        target = " · ".join(str(member.get(key) or "") for key in
+                            ("platform", "account_id", "native_account_id"))
+        details.append(f"{target}：{ROUTE_REJECTION_LABELS.get(code, '路由检查拒绝')}（{code}）")
+    return "关联账号路由不可用；" + "；".join(dict.fromkeys(details))
+
+
 PROACTIVE_TEST_SUGGESTIONS = {
+    "account_link_all_unavailable": "按诊断步骤中的逐账号拒绝原因检查权限、暂停、免打扰、权重或连接；管理员主动测试已豁免联系额度，生产额度保持不变。",
+    "proactive_recipient_required": "请在消息测试顶部选择核心管理员并保存；只有一个可用管理员时自动使用。",
+    "proactive_recipient_changed": "测试收件人或管理员身份已变化，请重新读取顶部收件人并保存后再试。",
+    "proactive_recipient_invalid": "请重新读取当前具有核心管理员权限的具体私聊目标。",
     "dashboard_identity_required": "当前请求没有可用于真实投递的 Dashboard 登录身份。请从已登录的管理界面重新打开；插件 API Key 不能代替 Dashboard 登录会话。",
     "unbound_identity": "当前 Dashboard 身份还没有完成本体绑定。请从已登录的管理界面重新打开一次，让系统建立当前安装的身份绑定。",
     "binding_revoked": "当前 Dashboard 身份与本体的绑定已撤销。请由仍有核心权限的管理员重新确认该身份，不要反复运行真实投递测试。",
@@ -84,6 +115,13 @@ PROACTIVE_TEST_SUGGESTIONS = {
     "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误；确认没有收到后，再用新的验收尝试重测。",
     "setup_core_window_ambiguous": "检查已配置私聊目标的核心用户身份；主动测试只会发送到唯一且当前有效的核心管理员私聊窗口。",
     "host_persona_binding_changed": "绑定已按当前窗口自动修复；若反复出现，请在「开始使用」重新确认管理员私聊窗口。",
+    "host_account_unavailable": "在 AstrBot 的账号设置里确认该 Bot 已登录并在线，然后重新测试；错误详情里带着具体的平台与账号。",
+    "host_platform_unavailable": "确认 AstrBot 里仍存在这条平台实例；改名或重建平台后，回「账号与会话」重新核对映射。",
+    "host_persona_window_unbound": "打开「账号与会话」，在角色映射里给这个私聊窗口补上它现在使用的人格；或在 AstrBot 里把该会话的人格改回已映射的那个，保存后重新测试。",
+    "host_persona_unmapped": "这台 Bot 还没有任何人格映射；先在「账号与会话」把角色人格绑定到当前 Bot，再重新测试。",
+    "task_lane_full": "本次测试没有抢到后台任务通道，还没开始生成。稍等几十秒再测；同一通道也被自动主动消息、人格复核、记忆反思共用，bot 较忙时可把「运行环境 → 后台任务槽」调到 2 以上。",
+    "task_concurrency_limited": "同一私聊已有主动消息任务在排队或执行，本次测试没有开始。等它结束后再测，不要连续点击测试。",
+    "proactive_lane_busy": "后台任务通道持续被占用（通常是自动主动消息正在生成），本次测试没有开始，也没有发出任何消息。等它结束后再测，或把「运行环境 → 后台任务槽」调到 2 以上。",
 }
 
 PROACTIVE_TEST_FAILURE_LABELS = {
@@ -108,7 +146,12 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "contact_quiet_hours": ("settings", "当前处于免打扰时段"),
     "model_task_unregistered": ("model_route", "主动联系模型任务未配置"),
     "contact_diagnostic_source_required": ("trusted_candidate", "当前用途没有可核验的测试机会"),
+    "contact_diagnostic_source_changed": ("trusted_candidate", "诊断来源凭据已变化"),
     "contact_diagnostic_variant_invalid": ("trusted_candidate", "测试来源选择无效"),
+    "contact_conversation_changed": ("trusted_candidate", "诊断来源会话在测试期间发生变化"),
+    "contact_input_changed": ("trusted_candidate", "诊断来源原文已变化"),
+    "contact_input_unavailable": ("trusted_candidate", "诊断来源原文不可用"),
+    "contact_context_mismatch": ("trusted_candidate", "诊断来源与原窗口不一致"),
     "contact_weather_unavailable": ("trusted_candidate", "天气观测来源不可用"),
     "contact_weather_change_unavailable": ("trusted_candidate", "天气变化来源不可用"),
     "contact_official_alert_unavailable": ("trusted_candidate", "官方预警来源不可用"),
@@ -125,6 +168,13 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "model_generation_failed": ("model_generation", "主动联系模型生成失败"),
     "model_budget_exhausted": ("model_generation", "主动消息模型每日硬额度已用完"),
     "model_budget_soft_deferred": ("model_generation", "主动消息模型生成被每日软限额暂缓"),
+    "task_lane_full": ("runtime", "本机后台任务通道已满，本次测试未开始"),
+    "task_concurrency_limited": ("runtime", "同类主动任务已达并发上限，本次测试未开始"),
+    "proactive_lane_busy": ("runtime", "后台任务通道持续被占用，本次测试未开始"),
+    "host_account_unavailable": ("runtime", "配置的 Bot 账号当前未连接 AstrBot"),
+    "host_platform_unavailable": ("runtime", "配置的平台实例不在当前 AstrBot 中"),
+    "host_persona_window_unbound": ("binding", "当前窗口的人格没有绑定到这台 Bot"),
+    "host_persona_unmapped": ("binding", "这台 Bot 还没有人格映射"),
     "persona_review_denied": ("persona_review", "人格复核未放行"),
     "delivery_result_unknown": ("delivery", "平台投递结果未知"),
     "delivery_failed": ("delivery", "平台投递失败"),
@@ -137,6 +187,7 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
     "settings": "检查主动联系总开关、目的开关及角色/关系/窗口各层的有效配置。",
     "purpose": "检查该用途是否启用、暂停时间是否结束，以及当前权限是否覆盖该私聊。",
     "trusted_candidate": "检查所选用途的测试条件；事件类等待当前有效来源，关系表达类确认私聊窗口和用途开关。不要手工补造事件。",
+    "contact_admission": "检查诊断来源会话是否在测试期间被新消息取代；若刚发过消息，等待该轮完成后再测。",
     "news_fetch": "检查当前配置的真实资讯源是否可访问、是否返回带日期的有效条目。",
     "weather_fetch": "检查已配置的角色所在地与真实天气接口；测试会即时获取观测。",
     "screen_capture": "检查已授权的截图设备及本次任务记录；未知结果不能重拍。",
@@ -155,7 +206,7 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
 PROACTIVE_TEST_STAGE_ORDER = (
     "authorization", "binding", "runtime", "settings", "purpose", "news_fetch", "weather_fetch",
     "screen_capture", "screen_interpretation", "mobile_location_fetch", "image_attachment", "trusted_candidate",
-    "attempt_budget", "delivery_budget",
+    "contact_admission", "attempt_budget", "delivery_budget",
     "model_route", "model_generation", "persona_review", "delivery", "receipt",
 )
 
@@ -175,6 +226,9 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "authorization_not_active": "authorization",
     "setup_binding_confirmation_required": "binding",
     "setup_core_window_not_configured": "binding",
+    "proactive_recipient_required": "binding",
+    "proactive_recipient_changed": "binding",
+    "proactive_recipient_invalid": "binding",
     "setup_core_window_ambiguous": "binding",
     "setup_private_window_required": "binding",
     "host_persona_binding_changed": "binding",
@@ -184,7 +238,12 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "contact_purpose_paused": "purpose",
     "contact_quiet_hours": "purpose",
     "contact_diagnostic_source_required": "trusted_candidate",
+    "contact_diagnostic_source_changed": "trusted_candidate",
     "contact_diagnostic_variant_invalid": "trusted_candidate",
+    "contact_conversation_changed": "trusted_candidate",
+    "contact_input_changed": "trusted_candidate",
+    "contact_input_unavailable": "trusted_candidate",
+    "contact_context_mismatch": "trusted_candidate",
     "reality_location_unavailable": "mobile_location_fetch",
     "reality_location_not_authorized": "mobile_location_fetch",
     "reality_location_label_unavailable": "mobile_location_fetch",
@@ -193,15 +252,85 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "model_provider_unavailable": "model_route",
     "model_budget_exhausted": "model_generation",
     "model_budget_soft_deferred": "model_generation",
+    "task_lane_full": "runtime",
+    "task_concurrency_limited": "runtime",
+    "proactive_lane_busy": "runtime",
+    "host_account_unavailable": "runtime",
+    "host_platform_unavailable": "runtime",
+    "host_persona_window_unbound": "binding",
+    "host_persona_unmapped": "binding",
     "delivery_result_unknown": "delivery",
     "delivery_failed": "delivery",
 }
+
+
+# A model choice is saved even when the shared installation cannot be created
+# yet: these codes mean "this Bot is not connected right now", which the host's
+# own start loop keeps retrying, so the setup step reports a deferral instead of
+# a failure. Every other code is a configuration problem the operator must fix.
+INIT_DEFERRED_CODES = frozenset(("host_account_unavailable", "host_platform_unavailable"))
+
+
+def deferred_initialization(failure):
+    """Describe a saved model whose shared installation waits for its Bot.
+
+    Choosing a provider needs no live account; creating the installation reads
+    the real windows and does. ``None`` means "not a deferral", so the caller
+    keeps its normal failure path. The returned payload tells the page that the
+    provider is saved and only the account connection is missing.
+    """
+    code = getattr(failure, "code", None)
+    if code not in INIT_DEFERRED_CODES:
+        return None
+    return {"prepared": False, "init_deferred": True, "init_code": code,
+            "init_reason": getattr(failure, "reason", "") or ""}
+
+
+def _fail_stage(stages, stage):
+    """Mark one stage failed without listing the same stage twice.
+
+    A capacity refusal belongs to a stage the flow already recorded as passed
+    (``runtime``). Appending it again would show "运行环境 通过" and
+    "运行环境 失败" on the same card, so the existing row is upgraded instead.
+    """
+    for item in stages:
+        if item["stage"] == stage:
+            item["state"] = "failed"
+            return item
+    item = {"stage": stage, "state": "failed"}
+    stages.append(item)
+    return item
+
+
+def _settle_failed_stages(stages, stage):
+    """Mark one stage failed and close every later running/pending placeholder.
+
+    The setup runner pre-creates the generation/review/delivery/receipt rows with
+    ``running``/``pending`` before calling the producer.  If admission fails before
+    generation starts, leaving those rows untouched makes the page look stuck on
+    "模型生成中" even though the terminal error is already known.  A failed test
+    has no future work in this attempt, so every unfinished placeholder becomes
+    ``skipped``; the failed stage is kept exactly once.
+    """
+    existing = next((item for item in stages if item["stage"] == stage), None)
+    # ``unknown`` is a real terminal result for a side-effecting step (for
+    # example a screenshot was captured but interpretation is uncertain).  Do
+    # not turn it into a hard failure merely because the overall test failed.
+    failed = existing if existing is not None and existing.get("state") == "unknown" else _fail_stage(stages, stage)
+    for item in stages:
+        if item is failed:
+            continue
+        if item["state"] in ("running", "pending"):
+            item["state"] = "skipped"
+    return failed
 
 
 class SetupWebAPI:
     def __init__(self, controller):
         self.controller = controller
         self.progress = SetupStateStore(controller.data_root)
+        from .diagnostic_recipient import DiagnosticRecipientStore
+        self.diagnostic_recipient = DiagnosticRecipientStore(controller.data_root)
         self._test_lock = asyncio.Lock()
         self._test_task = None
 
@@ -223,6 +352,8 @@ class SetupWebAPI:
             (PREFIX + "/complete", self.complete, ["POST"], "Record a completed Companion V2 setup section"),
             (PREFIX + "/proactive-test", self.proactive_test, ["POST"], "Run a one-time proactive contact through the V2 contact and delivery pipeline"),
             (PREFIX + "/proactive-test/status", self.proactive_test_status, ["GET"], "Read the existing proactive test receipt without host discovery"),
+            (PREFIX + "/proactive-recipients", self.proactive_recipients, ["GET"], "Read current core administrator test recipients"),
+            (PREFIX + "/proactive-recipient", self.save_proactive_recipient, ["POST"], "Save the reviewed diagnostic recipient"),
             (PREFIX + "/proactive-diagnostic", self.proactive_diagnostic, ["POST"], "Run a confirmed purpose-specific proactive diagnostic to the core administrator"),
             (PREFIX + "/proactive-test/confirm", self.confirm_proactive_test, ["POST"], "Record administrator confirmation of the existing test message"),
         ]
@@ -412,9 +543,11 @@ class SetupWebAPI:
             try:
                 # The runtime may already share one persona role across Bot
                 # accounts; use the same normalized mapping in the setup picker.
+                parsed = getattr(self.controller, "settings", None)
+                if parsed is None or not hasattr(parsed, "personas"):
+                    parsed = MultiHostSettings.parse(self.controller.config)
                 mapping_rows = [{"bot_id": item.bot_id, "persona_id": item.persona_id,
-                                 "role_id": item.role_id}
-                                for item in MultiHostSettings.parse(self.controller.config).personas]
+                                 "role_id": item.role_id} for item in parsed.personas]
             except (HostControlError, ValueError):
                 mapping_rows = self.controller.config.get("multi_host", {}).get("personas", [])
             choices = []
@@ -603,6 +736,18 @@ class SetupWebAPI:
                 raise TaskError(settings_error.code, str(settings_error))
             stage = "profile_initialization"
             initialized = await self.controller.initialize_profile()
+            deferred = deferred_initialization(initialized.failure)
+            if deferred is not None:
+                # Choosing a model does not need a connected Bot; creating the
+                # shared installation does. The provider is already saved, so
+                # report the deferral instead of claiming the step failed, and
+                # let the host create the installation once the account is back
+                # (its own start loop retries, and this button can be pressed
+                # again at any time).
+                logger.info("[CompanionV2] 模型已保存，宿主初始化等待账号连接 code=%s",
+                            deferred["init_code"])
+                return self._response(Outcome.success({
+                    "provider_id": provider_id, **deferred, "status": self._status_document()}))
             if initialized.failure is not None:
                 if initialized.failure.code != "host_must_stop":
                     raise TaskError(initialized.failure.code, initialized.failure.reason)
@@ -825,7 +970,67 @@ class SetupWebAPI:
         session, context, instruction, _target = await self._setup_context_with_target()
         return session, context, instruction
 
+    async def _recipient_document(self):
+        resolver = getattr(self.controller, "proactive_diagnostic_targets", None)
+        if not callable(resolver):
+            raise TaskError("proactive_recipients_unavailable", "the shared host does not support recipient selection")
+        targets = await resolver()
+        stored = self.diagnostic_recipient.read()
+        selected = next((t for t in targets if self.diagnostic_recipient.identity(t) == stored), None)
+        # A unique live CORE recipient needs no manual configuration, even after
+        # removal/revocation of a previously saved recipient.
+        if len(targets) == 1:
+            selected = targets[0]
+        return targets, selected, {"candidates": [
+            {**self.diagnostic_recipient.identity(t),
+             "label": f"{t.participant_id} · {t.platform_id} / {t.account_id}"} for t in targets],
+            "selected_target_id": selected.target_id if selected else "",
+            "selection_required": len(targets) > 1 and selected is None,
+            "stale_selection": stored is not None and not any(
+                self.diagnostic_recipient.identity(t) == stored for t in targets)}
+
+    async def proactive_recipients(self):
+        try:
+            self._admin()
+            _targets, _selected, document = await self._recipient_document()
+            return self._response(Outcome.success(document))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, OSError, UnicodeError):
+            return self._error("proactive_recipient_unavailable", "the saved test recipient could not be read")
+
+    async def save_proactive_recipient(self):
+        try:
+            self._admin()
+            data = await self._body({"target_id"})
+            if type(data["target_id"]) is not str or not data["target_id"]:
+                raise ValueError("choose a current core administrator")
+            if self._test_lock.locked():
+                raise TaskError("proactive_test_busy", "wait for the running diagnostic before changing its recipient")
+            async with self._test_lock:
+                targets, _selected, _document = await self._recipient_document()
+                target = next((t for t in targets if t.target_id == data["target_id"]), None)
+                if target is None:
+                    raise TaskError("proactive_recipient_invalid", "choose a currently authorized core administrator private target")
+                self.diagnostic_recipient.write(self.diagnostic_recipient.identity(target))
+                _targets, _selected, document = await self._recipient_document()
+                return self._response(Outcome.success(document))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, OSError, UnicodeError):
+            return self._error("proactive_recipient_invalid", "the test recipient could not be saved")
+
+    async def _selected_diagnostic_target(self, requested=None):
+        _targets, selected, _document = await self._recipient_document()
+        if selected is None:
+            raise TaskError("proactive_recipient_required", "select and save a core administrator test recipient first")
+        if requested is not None and (type(requested) is not str or requested != selected.target_id):
+            raise TaskError("proactive_recipient_changed", "the saved test recipient changed; refresh before starting")
+        return selected
+
     async def _proactive_diagnostic_target(self):
+        if callable(getattr(self.controller, "proactive_diagnostic_targets", None)):
+            return await self._selected_diagnostic_target()
         binding = self._binding()
         if binding.get("bound") and not binding.get("pending"):
             return None
@@ -844,6 +1049,15 @@ class SetupWebAPI:
         session = self.controller.session or self.controller.last_session
         if session is None:
             raise TaskError("staging_not_initialized", "initialize the selected V2 role first")
+        if callable(getattr(self.controller, "proactive_diagnostic_targets", None)):
+            if await self._selected_diagnostic_target(fallback_target.target_id) != fallback_target:
+                raise TaskError("proactive_recipient_changed", "the recipient mapping changed before synchronization")
+            context, instruction = await session.synchronize(fallback_target)
+            if await self._selected_diagnostic_target(fallback_target.target_id) != fallback_target:
+                raise TaskError("proactive_recipient_changed", "the recipient identity changed during synchronization")
+            if context.scope.kind is not ScopeKind.PRIVATE:
+                raise TaskError("setup_private_window_required", "the diagnostic recipient must be private")
+            return session, context, instruction
         context, instruction = await session.synchronize(fallback_target)
         binding = self._binding()
         if (not binding.get("bound") or binding.get("pending")
@@ -1022,11 +1236,14 @@ class SetupWebAPI:
             try:
                 username = self._admin()
                 data = await self._body({"purpose", "confirm_delivery"},
-                    optional={"variant", "synthetic_event", "diagnostic_image"})
+                    optional={"variant", "synthetic_event", "diagnostic_image", "target_id", "allow_linked_accounts"})
                 purpose = data["purpose"]
                 variant = data.get("variant")
                 synthetic_event = data.get("synthetic_event", False)
                 diagnostic_image = data.get("diagnostic_image", False)
+                allow_linked_accounts = data.get("allow_linked_accounts", False)
+                if type(allow_linked_accounts) is not bool:
+                    raise TaskError("proactive_test_confirmation_required", "allow_linked_accounts must be an explicit boolean")
                 if type(purpose) is not str or purpose not in PURPOSES or data["confirm_delivery"] is not True:
                     raise TaskError("proactive_test_confirmation_required",
                                     "choose one proactive purpose and confirm delivery to the core administrator")
@@ -1041,6 +1258,8 @@ class SetupWebAPI:
                     raise TaskError("contact_diagnostic_variant_invalid",
                                     "choose a supported environment source for this proactive purpose")
                 fallback_target = await self._proactive_diagnostic_target()
+                if "target_id" in data and (fallback_target is None or data["target_id"] != fallback_target.target_id):
+                    raise TaskError("proactive_recipient_changed", "refresh the saved test recipient before starting")
                 started = datetime.now(timezone.utc).isoformat()
                 attempt_id = uuid4().hex
                 existing = self.controller.session or self.controller.last_session
@@ -1115,16 +1334,20 @@ class SetupWebAPI:
                         error.code, ("trusted_candidate", "当前来源生产器未能生成有效候选"))[0]
                     stages = [{"stage": name, "state": "passed"} for name in
                         ("authorization", "binding", "runtime", "settings", "purpose")]
-                    stages.append({"stage": failure_stage, "state": "failed"})
+                    _settle_failed_stages(stages, failure_stage)
                     return self._response(Outcome.success(self._diagnostic_failure(
                         purpose, route_hint, failure_stage, error.code, str(error),
                         stages=stages, route=route_hint)))
+                if fallback_target is not None and callable(getattr(self.controller, "proactive_diagnostic_targets", None)):
+                    if await self._selected_diagnostic_target(fallback_target.target_id) != fallback_target:
+                        raise TaskError("proactive_recipient_changed", "the recipient changed while preparing diagnostic sources")
                 opportunity, intents = candidate["opportunity"], candidate["intents"]
                 route = candidate["route"]
                 label = PURPOSES[purpose]
                 result = await session.application.proactive.contact(context, opportunity, intents,
                     role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
                     administrator_test=True, diagnostic_source_backed=not synthetic_event,
+                    **({"diagnostic_allow_linked_accounts": True} if allow_linked_accounts else {}),
                     diagnostic_origin=candidate["diagnostic_origin"],
                     diagnostic_image_intent=("适合轻松、友好、自然日常互动的表情图片；不适合严肃、悲伤、冲突或边界语境。"
                                              if diagnostic_image else None))
@@ -1136,7 +1359,7 @@ class SetupWebAPI:
                         ("authorization", "binding", "runtime", "settings", "purpose")]
                     stages.extend(candidate.get("stages", []))
                     stages.append({"stage": "trusted_candidate", "state": "passed"})
-                    stages.append({"stage": failure_stage, "state": "failed"})
+                    _settle_failed_stages(stages, failure_stage)
                     budget_usage = self._diagnostic_attempt_usage(
                         session, context, failure.code)
                     return self._response(Outcome.success(self._diagnostic_failure(
@@ -1169,7 +1392,7 @@ class SetupWebAPI:
                             stages=stages, task_id=task.task_id, route=route)))
                     observation = observed.unwrap()
                     current_task = require(session.application.tasks.read(context, task.task_id))
-                    if observation["skipped"] or observation["delivery"] in ("delivered", "failed", "unknown", "accepted"):
+                    if observation["skipped"] or observation["delivery"] in ("delivered", "failed", "cancelled", "partial", "unknown", "accepted"):
                         break
                     if current_task.state in ("failed", "cancelled", "expired", "uncertain"):
                         break
@@ -1191,25 +1414,36 @@ class SetupWebAPI:
                                        else "failed" if observation["judge_allowed"] is False
                                        else "not_required" if judge is None else "pending")
                 stage_by_name["delivery"]["state"] = ("skipped" if skipped else "passed" if delivery == "delivered"
-                                       else "failed" if delivery in ("failed", "unknown")
+                                       else "failed" if delivery in ("failed", "cancelled", "partial", "unknown")
                                        else "pending")
                 stage_by_name["receipt"]["state"] = ("skipped" if skipped else "passed" if delivery == "delivered"
                                       and observation.get("receipt_ref") else
-                                      "failed" if delivery in ("failed", "unknown") else "pending")
+                                      "failed" if delivery in ("failed", "cancelled", "partial", "unknown") else "pending")
                 state = ("failed" if diagnostic_image and not image_attached else
                          "skipped" if skipped else "passed" if delivery == "delivered"
                          else "unknown" if delivery in ("unknown", "accepted")
                          else "pending" if delivery in (None, "pending", "dispatched")
                          else "failed")
+                route_failure = _diagnostic_route_failure(observation) if state == "failed" else None
+                if route_failure:
+                    stage_by_name["delivery"]["detail"] = redact_text(route_failure)
                 code = ("proactive_diagnostic_image_unavailable" if diagnostic_image and not image_attached else
-                        None if state in ("passed", "skipped") else current_task.reason or (
+                        None if state in ("passed", "skipped") else
+                        "account_link_all_unavailable" if route_failure else
+                        (current_task.reason if current_task.state != "succeeded" else None) or (
                     "delivery_result_unknown" if state == "unknown" else "delivery_failed" if state == "failed"
                     else "proactive_test_timeout"))
                 return self._response(Outcome.success({"state": state, "purpose": purpose,
                     "purpose_label": label, "variant": route,
                     "route": route,
                     "event_mode": "synthetic_event" if synthetic_event else "source_backed",
-                    "recipient": "core_administrator", "attempt_id": attempt_id, "task_id": task.task_id,
+                    "recipient": "core_administrator",
+                    "recipient_target": self.diagnostic_recipient.identity(fallback_target)
+                        if hasattr(self, "diagnostic_recipient") and hasattr(fallback_target, "target_id") else None,
+                    "allow_linked_accounts": allow_linked_accounts,
+                    "delivery_targets": self._diagnostic_delivery_targets(session, context, task.task_id),
+                    "route_rejections": observation.get("route_rejections", []),
+                    "attempt_id": attempt_id, "task_id": task.task_id,
                     "task_state": current_task.state, "delivery_state": delivery,
                     "judge_state": judge, "judge_reason": (redact_text(observation["judge_reason"])
                         if observation["judge_reason"] else None),
@@ -1223,7 +1457,7 @@ class SetupWebAPI:
                     "usage_summary": self._diagnostic_usage_summary(session, context),
                     "receipt_ref": observation["receipt_ref"], "stage": None if state in ("passed", "skipped") else
                         "delivery" if delivery else "model_generation", "code": code,
-                    "error": None if code is None else redact_text(current_task.reason or code),
+                    "error": None if code is None else redact_text(route_failure or (current_task.reason if current_task.state != "succeeded" else None) or code),
                     "suggestion": (PROACTIVE_TEST_SUGGESTIONS.get(code)
                         or PROACTIVE_TEST_STAGE_SUGGESTIONS.get(stage_by_name.get("delivery", {}).get("stage", "delivery")))
                         if code else None,
@@ -1241,6 +1475,25 @@ class SetupWebAPI:
                 return self._response(Outcome.success(self._diagnostic_failure(
                     data.get("purpose") if "data" in locals() and isinstance(data, dict) else None,
                     None, "execution", "proactive_test_failed", f"{type(error).__name__}: {error}")))
+
+    @staticmethod
+    def _diagnostic_delivery_targets(session, context, task_id):
+        getter = getattr(session.application.proactive, "_delivery_rows", None)
+        router = getattr(getattr(session.application, "outbound", None), "private_account_router", None)
+        rows = getter(task_id) if callable(getter) else ()
+        recipients = []
+        seen = set()
+        for row in rows:
+            if row["state"] not in ("delivered", "accepted", "unknown", "dispatched"):
+                continue
+            actual = router.actual_context(row["delivery_id"]) if router is not None else None
+            scope = (actual or context).scope
+            key = (scope.platform, scope.account_id, scope.native_scope_id, row["state"])
+            if key not in seen:
+                seen.add(key)
+                recipients.append({"platform_id": key[0], "account_id": key[1],
+                                   "participant_id": key[2], "delivery_state": key[3]})
+        return recipients
 
     @staticmethod
     def _diagnostic_attempt_usage(session, context, code):
@@ -1297,6 +1550,8 @@ class SetupWebAPI:
             stages = ([{"stage": name, "state": "passed"}
                        for name in PROACTIVE_TEST_STAGE_ORDER[:failed_index]]
                       + [{"stage": stage, "state": "failed"}])
+        else:
+            _settle_failed_stages(stages, stage)
         return {"state": state, "purpose": purpose,
             "purpose_label": PURPOSES.get(purpose) if purpose else None,
             "variant": (variant if isinstance(variant, dict) else
@@ -1398,8 +1653,8 @@ class SetupWebAPI:
                 diagnostic_origin=candidate["diagnostic_origin"])
             if result.failure is not None:
                 failed_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
-                    result.failure.code, ("model_route", "主动联系准入检查失败"))[0]
-                stages.append({"stage": failed_stage, "state": "failed"})
+                    result.failure.code, ("contact_admission", "主动联系准入检查失败"))[0]
+                _settle_failed_stages(stages, failed_stage)
                 self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
                 self.progress.finish_proactive_test(outcome="failed",
                     finished_at=datetime.now(timezone.utc).isoformat(), error_code=result.failure.code,
@@ -1407,7 +1662,7 @@ class SetupWebAPI:
                 return
             task = result.unwrap().task
             if task is None:
-                stage_state("model_generation", "failed")
+                _settle_failed_stages(stages, "model_generation")
                 self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
                 self.progress.finish_proactive_test(outcome="failed",
                     finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_contact_not_started",

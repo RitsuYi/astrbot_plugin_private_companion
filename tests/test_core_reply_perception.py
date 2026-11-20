@@ -65,6 +65,31 @@ def video_state(request):
 
 
 class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structured_background_preserves_later_turn_guidance(self):
+        event = Event()
+        turn = prepared(options=(False, False, False))
+        turn["prompt_context_instruction"] = "\n\n【相处背景】\n原始材料"
+        turn["prompt_context_blocks"] = ({"title": "相处背景", "instruction": "参考",
+                                          "materials": [{"kind": "memory", "content": {"text": "原始材料"}}]},)
+        turn["prompt_instruction"] = turn["prompt_context_instruction"] + "\n\n【对话收尾】\n自然结束"
+        event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": turn}
+        request = NS(extra_user_content_parts=[])
+        await inject_core_reply_perception_context(event, request)
+        background = perception_payload(request)["companion_background"]
+        self.assertEqual(background["sections"][0]["materials"][0]["content"]["text"], "原始材料")
+        self.assertIn("自然结束", background["additional_guidance"])
+
+    async def test_group_without_mentions_retains_wake_name_restoration(self):
+        event = Event()
+        event.is_at_or_wake_command = True
+        turn = prepared(options=(False, False, False))
+        turn["native_input"] = NS(text="星缘黑先吧", group_message_text="星缘黑先吧")
+        event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": turn}
+        context = NS(get_config=lambda **_: {"wake_prefix": ["星缘"]})
+        request = NS(prompt="黑先吧", extra_user_content_parts=[])
+        await inject_core_reply_perception_context(event, request, native_context=context)
+        self.assertEqual(request.prompt, "星缘黑先吧")
+
     async def test_configured_wake_name_restores_primary_provider_prompt(self):
         event = Event()
         event.is_at_or_wake_command = True

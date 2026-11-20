@@ -24,6 +24,7 @@ from .contact_models import ContactIntent
 from .configuration import GROUP, PURPOSES, hour_activity_curve
 from .calendar_events import CalendarContactEvents
 from .date_events import DateContactEvents
+from .exploration import ExplorationEvents
 from .events import ActivityContactEvents
 from .greetings import GreetingContactEvents
 from .health_events import HealthContactEvents
@@ -117,9 +118,26 @@ class ContactSchedule:
             contacts, role_state, weather_alert_port) if role_state is not None else None
         self.balance_events = BalanceContactEvents(contacts, balance_port)
         self.news_events = NewsContactEvents(contacts, news_port)
+        self.exploration = (ExplorationEvents(contacts, self.date_events, news_port)
+                            if news_port is not None else None)
         self.screen_events = ScreenContactEvents(contacts)
         self.relationship_events = RelationshipContactEvents(contacts, messages)
         self._diagnostics_cleaned_at = None
+        self._connection_available = None
+
+    def bind_connection_gate(self, available):
+        """Pause outbound planning for unavailable accounts without retiring a window."""
+        self._connection_available = available
+
+    def _account_available(self, context):
+        return self._connection_available is None or self._connection_available(context)
+
+    def _row_available(self, row, now):
+        context = TaskContext.restore(json.loads(row["context_json"]))
+        if self._account_available(context):
+            return True
+        self._note_window(context, row, now, "connection", "skipped", "host_account_offline")
+        return False
 
     @staticmethod
     def _diagnostic_key(kind, value=""):
@@ -721,17 +739,16 @@ class ContactSchedule:
             return None
         relationship_candidate = self.relationship_events.prompt_candidates(
             context, preferences, event, at, opportunity=opportunity)
-        intents = []
+        candidates = []
         if chat_reason is None:
             thought = Thought("conversation-check-in", opportunity, ThoughtKind.CONVERSATION,
                 "这是一次低压力的主动联系机会。可以从角色自己的想法、兴趣或真实对话里自然开口；不要求依赖最近某条消息或具体事件。先找一个此刻想分享的小念头、具体感想或轻问题，简短说到位，不要求对方立即回复。自己的主观想法不需要活动完成回执；涉及刚做过的事、共同经历或用户状态时仍以材料为据。候选不贴切时可从人格兴趣换个独立切口；确实无话可说、只是重述旧话或越过明确边界时跳过。",
                 EvidenceSnapshot(context.scope, at, (event.source,)), 1.0)
-            intents.append(ContactIntent("chat", thought))
+            candidates.append(("chat", ContactIntent("chat", thought), None))
         if relationship_candidate is not None:
             _relationship_opportunity, relationship_intents, marker = relationship_candidate
-            intents.extend(relationship_intents)
-            origin = {**origin, "relationship_event": marker}
-        if not intents:
+            candidates.extend(("relationship", intent, marker) for intent in relationship_intents)
+        if not candidates:
             reason_code = {
                 "proactive_disabled": "contact_settings_disabled" if not preferences.values["enabled"]
                 else "chat_purpose_disabled",
@@ -740,7 +757,14 @@ class ContactSchedule:
             }.get(chat_reason, "contact_conditions_blocked")
             self._note_window(context, row, at, "settings", "skipped", reason_code, purpose="chat")
             return None
-        return context, opportunity, tuple(intents), batch["role_instruction"], origin
+        # One slot is one opening. Do not turn it into a batch of chat + five
+        # relationship purposes; rotate deterministically so the next slot can
+        # use another purpose without paying several model calls for this one.
+        selection = int(digest([opportunity.opportunity_id, "slot-purpose"])[:8], 16) % len(candidates)
+        _kind, intent, selected_marker = candidates[selection]
+        if selected_marker is not None:
+            origin = {**origin, "relationship_event": selected_marker}
+        return context, opportunity, (intent,), batch["role_instruction"], origin
 
     def _share_candidate(self, context, preferences, candidate):
         """Apply the configured share probability to a role-share candidate only."""
@@ -1466,6 +1490,8 @@ class ContactSchedule:
                 if datetime.fromisoformat(spec["deadline_at"]) <= at:
                     self._withhold(row, "judge_expired", "主动人格判定已过期，未判定的草稿不发送")
                     continue
+                if not self._account_available(context):
+                    continue
                 worker = asyncio.create_task(self.contacts.judge_runner.run(context, task_id),
                                              name="companion:contact-judge:" + task_id)
                 self._judges[task_id] = worker
@@ -1517,6 +1543,8 @@ class ContactSchedule:
                 preferences = self.contacts.preferences.read(context, observed_at=self.tasks.now())
                 if preferences.is_success:
                     self.news_events.maintain(context, preferences.unwrap())
+                    if getattr(self, "exploration", None) is not None:
+                        self.exploration.maintain(context, preferences.unwrap())
             except (TaskError, ValueError, TypeError, AttributeError):
                 # A source status must never take down the contact coordinator.
                 pass
@@ -1579,6 +1607,9 @@ class ContactSchedule:
     def _activate_plan(self, row, plan, available, now):
         context, _, intents, _, origin = plan
         purpose = intents[0].purpose if intents else None
+        if not self._account_available(context):
+            self._note_window(context, row, now, "connection", "skipped", "host_account_offline", purpose=purpose)
+            return available
         circuit_until = self.contacts.platform_circuit.cooldown_until(context, at=now)
         if circuit_until is not None:
             self._note_window(context, row, now, "delivery_admission", "skipped", "platform_circuit_open",
@@ -1618,6 +1649,8 @@ class ContactSchedule:
             if self._closed or available <= 0:
                 break
             self._row_cursor(row)
+            if not self._row_available(row, now):
+                continue
             try:
                 plan = self._plan_one(row, now)
             except TaskError as error:
@@ -1645,6 +1678,8 @@ class ContactSchedule:
                 if self._closed or available <= 0:
                     break
                 self._row_cursor(row)
+                if not self._row_available(row, now):
+                    continue
                 planning = asyncio.create_task(asyncio.to_thread(self._plan_one, row, now))
                 self._planning = planning
                 try:
@@ -1700,6 +1735,8 @@ class ContactSchedule:
             self.health_events.close()
         self.balance_events.close()
         self.news_events.close()
+        if getattr(self, "exploration", None) is not None:
+            self.exploration.close()
         self.screen_events.close()
 
     def cancel_running(self, *, close_sources=True):

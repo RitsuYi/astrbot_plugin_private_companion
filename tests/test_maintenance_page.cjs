@@ -1,4 +1,4 @@
-const assert = require('node:assert/strict');
+﻿const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -34,8 +34,13 @@ function harness(responses) {
   let nextTimerId = 1;
   let modelReads = 0;
   const bridge = {
-    apiGet: async route => {
-      requests.push(['GET', route]);
+    apiGet: async (rawRoute, query) => {
+      rawRoute = rawRoute || '';
+      let route = rawRoute.startsWith('/') ? rawRoute : '/' + rawRoute;
+      if (query && Object.keys(query).length) route += '?' + new URLSearchParams(query).toString();
+      const fullRoute = route;
+      route = route.split('?')[0];
+      requests.push(['GET', fullRoute]);
       if (route.endsWith('/memory')) {
         const value = responses.memory;
         return typeof value === 'function' ? value(requests) : value || {rss_bytes: 64 * 1024 * 1024,
@@ -48,7 +53,7 @@ function harness(responses) {
       };
       if (route.endsWith('/voice')) return responses.voice || {providers: []};
       if (route.endsWith('/image')) return responses.image || {actions: []};
-      if (route.startsWith('/config?sections=system.prompts')) {
+      if (fullRoute.startsWith('/config?sections=system.prompts')) {
         const value = responses.systemPrompts;
         return typeof value === 'function' ? value(requests) : value;
       }
@@ -58,9 +63,11 @@ function harness(responses) {
           : responses.model;
         return typeof value === 'function' ? value(modelReads++) : value || {tasks: [], providers: []};
       }
-      throw new Error('unexpected GET ' + route);
+      throw new Error('unexpected GET ' + fullRoute);
     },
-    apiPost: async (route, body) => {
+    apiPost: async (rawRoute, body) => {
+      rawRoute = rawRoute || '';
+      const route = rawRoute.startsWith('/') ? rawRoute : '/' + rawRoute;
       requests.push(['POST', route, body]);
       const value = responses.posts?.[route];
       const result = typeof value === 'function' ? value(body, requests) : value;
@@ -121,7 +128,7 @@ function harness(responses) {
   window.Blob = BlobMock;
   window.atob = value => Buffer.from(value, 'base64').toString('binary');
   vm.runInNewContext(source, {window, document, URL: url, Blob: BlobMock, Intl, Date, Number, Object, String, Math,
-    Array, Set, Promise});
+    Array, Set, Promise, URLSearchParams});
   return {
     page: window.CompanionMaintenancePage, requests, root, exports: csvExports, downloads, confirmations, audioPreviews, revokedAudioUrls,
     advanceTimers: elapsed => {
@@ -483,7 +490,7 @@ test('dialogue and plugin views switch totals, rankings, cache, history, traces 
   assert.match(overview(), /data-rank-key="conversation\.reply"/);
   assert.doesNotMatch(overview(), /data-task-settings-kind="proactive\.compose"|plugin-provider/);
   const dialogueRecent = h.root.innerHTML.split('data-maint-view="recent"')[1];
-  assert.match(dialogueRecent, /对话 · AstrBot 核心与历史 · 1 \/ 1 条/);
+  assert.match(dialogueRecent, /对话合计 · 1 \/ 1 条/);
   assert.doesNotMatch(dialogueRecent, /已按排行筛选|plugin-provider/);
   h.root.click('[data-maint-nav]', {maintNav: 'cache'});
   const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
@@ -741,7 +748,7 @@ test('missing usage breakdown never substitutes role totals for plugin or dialog
   await flush();
   for (const tokenSource of ['plugin', 'conversation']) {
     h.root.click('[data-token-source]', {tokenSource});
-    assert.match(h.root.innerHTML, /分项统计尚未同步/);
+    assert.match(h.root.innerHTML, /所选来源暂不可用/);
     assert.doesNotMatch(h.root.innerHTML, /class="maint-token-hero maint-token-summary"/);
     const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
     assert.doesNotMatch(recent, /dialogue-provider/);
@@ -1912,7 +1919,9 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
   assert.match(root.innerHTML, /运行时提示组成/);
   assert.match(root.innerHTML, /业务任务指令/);
   assert.match(root.innerHTML, /本页可编辑/);
-  assert.match(root.innerHTML, /恢复角色级继承值/);
+  assert.match(root.innerHTML, /恢复上级继承值/);
+  assert.match(root.innerHTML, /shield-check"><\/i>角色默认/);
+  assert.doesNotMatch(root.innerHTML, /<small>当前窗口<\/small>/);
   assert.match(root.innerHTML, /回复规则：\{\{task_input\}\}/);
   assert.match(root.innerHTML, /内置版本/);
   assert.match(root.innerHTML, /v7/);
@@ -1971,7 +1980,7 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
   assert.equal(saved[1].kind, 'conversation.reply');
   assert.equal(Object.keys(saved[1].changes).length, 0);
   assert.deepEqual(Array.from(saved[1].reset), ['prompt']);
-  assert.match(root.innerHTML, /已恢复角色级继承值/);
+  assert.match(root.innerHTML, /已恢复上级继承值/);
 
   root.input('临时覆盖', '[data-prompt-draft]');
   root.input('   ', '[data-prompt-draft]');
@@ -2153,21 +2162,20 @@ test('the token total splits conversation, plugin and extension into one proport
   h.page.mount(h.root);
   await flush();
   const overview = () => h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
-  const split = overview().split('class="maint-usage-split"')[1].split('</section>')[0];
+  const split = overview().split('class="maint-cache-section maint-cache-composition-section maint-usage-composition"')[1].split('</section>')[0];
   assert.match(split, /总用量构成/);
-  assert.match(split, /合计 56,948 Token/);
-  assert.match(split, /data-part="conversation" style="--split-share:19\.3%"/);
-  assert.match(split, /data-part="plugin" style="--split-share:2\.3%"/);
-  assert.match(split, /data-part="extension" style="--split-share:78\.4%"/);
-  assert.match(split, /<span>对话<\/span><strong>11,000<\/strong><small>19\.3%<\/small>/);
-  assert.match(split, /<span>插件<\/span><strong>1,300<\/strong><small>2\.3%<\/small>/);
-  assert.match(split, /<span>拓展<\/span><strong>44,648<\/strong><small>78\.4%<\/small>/);
-  assert.match(split, /对话 \+ 插件构成角色总用量/);
-  assert.match(split, /aria-label="总用量构成：对话 11,000 Token，19\.3%；插件 1,300 Token，2\.3%；拓展 44,648 Token，78\.4%"/);
+  assert.match(split, /对话 \+ 插件 \+ 拓展 · 合计 56,948 Token/);
+  assert.match(split, /data-part="conversation" data-value="11000"/);
+  assert.match(split, /data-part="plugin" data-value="1300"/);
+  assert.match(split, /data-part="extension" data-value="44648"/);
+  assert.match(split, /<span><i><\/i>对话 <b>19\.3%<\/b><\/span><strong>11,000<\/strong><small>Token<\/small>/);
+  assert.match(split, /<span><i><\/i>插件 <b>2\.3%<\/b><\/span><strong>1,300<\/strong><small>Token<\/small>/);
+  assert.match(split, /<span><i><\/i>拓展 <b>78\.4%<\/b><\/span><strong>44,648<\/strong><small>Token<\/small>/);
+  assert.match(split, /对话与插件来自当前角色账本/);
   // 单项来源页签不展示三段合计，避免把角色总量当成单一来源。
   h.root.click('[data-token-source]', {tokenSource: 'plugin'});
   await flush();
-  assert.doesNotMatch(overview(), /maint-usage-split/);
+  assert.doesNotMatch(overview(), /maint-usage-composition/);
   h.page.unmount();
 
   // 没有接入任何内置能力时，拓展段写明未接入，不补一个 0 也不虚构比例。
@@ -2176,10 +2184,15 @@ test('the token total splits conversation, plugin and extension into one proport
     usage_sources: {conversation: source(11000), plugin: source(1300)}}});
   bare.page.mount(bare.root);
   await flush();
-  const bareSplit = bare.root.innerHTML.split('class="maint-usage-split"')[1].split('</section>')[0];
+  const bareSplit = bare.root.innerHTML.split('class="maint-cache-section maint-cache-composition-section maint-usage-composition"')[1].split('</section>')[0];
   assert.match(bareSplit, /合计 12,300 Token/);
-  assert.match(bareSplit, /<span>拓展<\/span><strong>未接入<\/strong><small>—<\/small>/);
-  const bareTrack = bareSplit.split('maint-usage-split-track')[1].split('</div>')[0];
+  assert.match(bareSplit, /<span><i><\/i>拓展 <b>—<\/b><\/span><strong>未接入<\/strong><small>Token<\/small>/);
+  const bareTrack = bareSplit.split('class="maint-cache-zip"')[1].split('</div>')[0];
   assert.doesNotMatch(bareTrack, /data-part="extension"/, '未接入的拓展不画成 0 宽度段');
   bare.page.unmount();
 });
+
+
+
+
+

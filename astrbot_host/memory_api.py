@@ -25,6 +25,7 @@ class MemoryWebAPI:
 
     def routes(self):
         return [(PREFIX, self.list, ["GET"], "Read V2 memory facts"),
+                (PREFIX + "/add", self.add, ["POST"], "Add one manually authored memory fact"),
                 (PREFIX + "/command", self.command, ["POST"], "Correct, pin or forget V2 memory facts"),
                 (PREFIX + "/revisions", self.revisions, ["GET"], "Review authorized memory fact revisions"),
                 (PREFIX + "/clear/preview", self.preview_clear, ["GET"], "Preview clearing this private relationship's facts"),
@@ -32,6 +33,7 @@ class MemoryWebAPI:
                 (PREFIX + "/reflections", self.reflections, ["GET"], "Inspect pending memory extraction and repair status"),
                 (PREFIX + "/reflections/retry", self.retry_reflection, ["POST"], "Repair a known failed memory extraction"),
                 (PREFIX + "/reflections/queue", self.queue_reflection, ["POST"], "Continue one requested memory reflection in the background"),
+                (PREFIX + "/reflections/discard", self.discard_reflection, ["POST"], "Close one stuck failed or partial memory reflection"),
                 (PREFIX + "/overview", self.overview, ["GET"], "Read authorized memory and linkage counts"),
                 (PREFIX + "/settings", self.settings, ["GET"], "Read unified V2 memory configuration"),
                 (PREFIX + "/settings/command", self.settings_command, ["POST"], "Update unified V2 memory configuration"),
@@ -95,6 +97,30 @@ class MemoryWebAPI:
 
     async def queue_reflection(self):
         return await self._submit_reflection(background=True)
+
+    async def discard_reflection(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 4096 or request.query:
+                raise ValueError()
+            def unique(pairs):
+                values = {}
+                for key, value in pairs:
+                    if key in values:
+                        raise ValueError()
+                    values[key] = value
+                return values
+            arguments = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+            if type(arguments) is not dict or set(arguments) != {"batch_id", "operation_key"}:
+                raise ValueError()
+            async with self.controller._control_lock:
+                manager, context = self._reflection_manager()
+                return outcome_response(manager.discard(context, **arguments))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("memory_request_invalid", "invalid reflection discard command"))
 
     async def _submit_reflection(self, *, background):
         from .web_api import outcome_response
@@ -269,6 +295,30 @@ class MemoryWebAPI:
         except ValueError:
             return outcome_response(Outcome.failed("memory_request_invalid", "invalid memory page size"))
         return await self._run({"after_id": request.query.get("after_id", ""), "limit": limit})
+
+    async def add(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 16384 or request.query:
+                raise ValueError()
+            def unique(pairs):
+                values = {}
+                for key, value in pairs:
+                    if key in values:
+                        raise ValueError()
+                    values[key] = value
+                return values
+            arguments = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+            required = {"operation_key", "subject", "predicate", "object"}
+            allowed = required | {"representation"}
+            if (type(arguments) is not dict or not required.issubset(arguments)
+                    or set(arguments) - allowed):
+                raise ValueError()
+            arguments.setdefault("representation", "")
+        except (ValueError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("memory_request_invalid", "invalid memory add command"))
+        return await self._run(arguments, mutation=True, method="add")
 
     async def command(self):
         from .web_api import outcome_response

@@ -19,10 +19,10 @@ window.CompanionModelsPage = (() => {
     ["感知", [["screen.interpretation", "屏幕解读", "分析已授权截图与摄像头单帧，需要支持图片的模型"],
       ["conversation.image_review", "图片审核", "检查群聊成图的可见内容"],
       ["reality.text", "现实提醒文案", "现实提醒、唤醒回执和短回复的文字生成"]]],
-    ["主动与记忆", [["proactive.plan", "主动联系规划", "双阶段模式下判断时机并整理新回合切口"],
+    ["主动与整理", [["proactive.plan", "主动联系规划", "双阶段模式下判断时机并整理新回合切口"],
       ["proactive.compose", "主动联系写作", "按所选方式生成主动消息正文"],
       ["proactive.judge", "主动联系复核", "复核主动消息是否符合当前人格与来源"],
-      ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
+      ["memory.reflect", "事实整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
     ["学习", [["role.expression.learn", "表达学习", "从当前会话的原始素材提炼表达规则"],
@@ -51,6 +51,8 @@ window.CompanionModelsPage = (() => {
     model_image_store_failed: "生图开关保存失败，请检查插件数据目录权限。",
     model_image_output_unavailable: "生图扩展尚未提供配置接口。", model_image_output_conflict: "生图配置已在其他页面更新，请重新读取后再保存。",
     model_image_output_busy: "当前有生图任务正在执行，请稍后保存。", model_image_output_invalid: "生图配置未通过校验，请检查模型、地址、参数与优先级。",
+    model_image_output_unconfigured: "还没有可用的生图模型：先添加并启用一个在线模型，或配置 ComfyUI / SD WebUI，再打开总开关。",
+    model_image_output_store_failed: "配置已读取，但写不回插件数据目录。请检查目录权限或被其它程序占用后重试。",
     model_image_output_failed: "生图模型配置读取或保存失败。",
     model_request_invalid: "请求未通过校验，请刷新后重试。",
     staging_profile_conflict: "当前角色映射已变化，请在账号与会话重新读取。",
@@ -96,11 +98,25 @@ window.CompanionModelsPage = (() => {
     try { const scopeKey = state.__scopeKey; if (!scopeKey) return;
       localStorage.setItem(expandStorageKey(scopeKey), JSON.stringify(state.expOpen || {})); } catch { }
   }
-  let root = null, path = null, key = null, state = null, version = 0;
+  let root = null, path = null, taskPath = null, key = null, state = null, version = 0, windowAvailable = true;
   const current = (ticket, s) => ticket === version && state === s && root?.isConnected;
   const taskOf = (s, kind) => s.status?.tasks.find(task => task.kind === kind) || null;
-  const configSource = source => ({ default: "插件默认", host_conversation: "AstrBot 会话", installation: "安装级", role: "角色级", window: "当前对象" }[source] || "上级配置");
-  const windowLabel = s => s.status?.scope_kind === "group" ? "当前群聊微调" : "当前私聊微调";
+  const configSource = source => ({ default: "插件默认", host_conversation: "AstrBot 会话", installation: "全局默认", role: "角色默认", window: "会话设置" }[source] || "上级配置");
+  const windowLabel = () => "仅此会话";
+  function modelScopeHint(s, task = null, draft = null) {
+    const workbench = window.CompanionWorkbench;
+    const object = workbench.scopeObjectForEndpoint(PREFIX + taskPath);
+    const layer = draft?.layer || s.layer;
+    const lines = [`保存到：${workbench.saveScopeLabel(layer, object)}`];
+    if (task && draft) {
+      for (const name of fields) {
+        const field = task.fields[name];
+        if (field && draft.inherited[name]) lines.push(`${fieldLabel[name]}继承自：${configSource(field.inherited_source || "default")}`);
+      }
+    }
+    lines.push("下一次任务生效");
+    return workbench.scopeHintMarkup(lines.join("\n"));
+  }
   const adoption = state => ({ applied: "已采用", next_task: "下次任务", consumer_not_started: "尚未运行", failed: "采用失败", pending: "等待采用", restart_required: "需重启" }[state] || state);
   const taskName = kind => names.get(kind) || { group: "其他任务", label: "其他模型任务", description: "V2 注册任务" };
   const taskGroups = s => {
@@ -113,7 +129,7 @@ window.CompanionModelsPage = (() => {
   };
   const snapshot = s => s?.status?.tasks || [];
   const coreReply = task => task?.execution_path === "astrbot_core";
-  const taskFields = task => coreReply(task) ? ["prompt"] : fields;
+  const taskFields = task => coreReply(task) ? ["prompt", "replacement_rules"] : fields;
   const fallbackFor = task => {
     if (coreReply(task)) return "";
     const field = task.fields.fallback;
@@ -298,10 +314,10 @@ window.CompanionModelsPage = (() => {
     // The host makes configure idempotent by operation_key. A bridge timeout
     // is therefore an unknown result, not a failed write: re-send that exact
     // operation once before asking the user to reconcile it manually.
-    try { return await api("POST", path + "/configure", payload, TASK_CONFIG_TIMEOUT_MS); }
+    try { return await api("POST", taskPath + "/configure", payload, TASK_CONFIG_TIMEOUT_MS); }
     catch (err) {
       if (!isBridgeTimeout(err)) throw err;
-      return api("POST", path + "/configure", payload, TASK_CONFIG_RETRY_TIMEOUT_MS);
+      return api("POST", taskPath + "/configure", payload, TASK_CONFIG_RETRY_TIMEOUT_MS);
     }
   }
   function validateStatus(data) { if (!Array.isArray(data.tasks) || !Array.isArray(data.providers) || data.tasks.some(task =>
@@ -323,7 +339,7 @@ window.CompanionModelsPage = (() => {
     if (Object.hasOwn(p.changes, "fallback_on_refusal") && typeof p.changes.fallback_on_refusal !== "boolean") return false;
     if (Object.hasOwn(p.changes, "replacement_rules") && (typeof p.changes.replacement_rules !== "string" || p.changes.replacement_rules.length > 24000)) return false;
     if (Object.hasOwn(p.changes, "refusal_terms") && (typeof p.changes.refusal_terms !== "string" || p.changes.refusal_terms.length > 4096)) return false;
-    if (coreReply(task)) return Object.keys(p.changes).concat(p.reset).every(name => name === "prompt");
+    if (coreReply(task)) return Object.keys(p.changes).concat(p.reset).every(name => name === "prompt" || name === "replacement_rules");
     const primary = projected(task, p, "provider"), fallback = projected(task, p, "fallback"), limit = projected(task, p, "max_output_tokens");
     const picked = [primary, ...(fallback ? [fallback] : [])], providers = picked.map(id => state.status.providers.find(provider => provider.id === id));
     const fallbackExplicit = Object.hasOwn(p.changes, "fallback")
@@ -356,9 +372,9 @@ window.CompanionModelsPage = (() => {
     write: '<path d="M4 20l4-1 10-10-3-3L5 16l-1 4Z"/>',
     lane: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     decision: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="5"/><path d="m8.5 8.5 7 7M15.5 8.5l-7 7"/>' };
-  const groupIcon = name => ({ "对话": ICONS.reply, "主动与记忆": ICONS.memory, "生活与成长": ICONS.life, "私人书写": ICONS.write }[name] || ICONS.lane);
+  const groupIcon = name => ({ "对话": ICONS.reply, "主动与整理": ICONS.memory, "生活与成长": ICONS.life, "私人书写": ICONS.write }[name] || ICONS.lane);
   function topbar(s) {
-    return `<div class="model-topbar"><span class="model-topbar-t">当前对象与角色 · 任务 → 模型提供方路由</span>
+    return `<div class="model-topbar"><span class="model-topbar-t">任务模型</span>${window.CompanionWorkbench.scopeHintMarkup(Object.entries(window.CompanionWorkbench.scopeObjectForEndpoint(PREFIX + taskPath)).filter(([name,value]) => value && (name !== "target" || windowAvailable)).map(([,value]) => value).join(" · ") || "当前配置", "查看任务模型配置对象")}
       <span class="model-pill ${s.status?.host_state === "running" ? "ok" : "warn"}">${esc(s.status?.host_state === "running" ? "运行中" : s.status?.host_state || "未连接")}</span>
       <button type="button" class="button small" data-model-action="refresh" ${s.loading || s.busy ? "disabled" : ""}>刷新配置</button></div>`; }
   function overview(s) { const tasks = snapshot(s), custom = tasks.filter(task => taskFields(task).some(name => task.fields[name].explicit)).length;
@@ -372,7 +388,7 @@ window.CompanionModelsPage = (() => {
   function toolbar(s) { const count = selected(s).length;
     return `<div class="model-toolbar"><label class="model-search"><span>搜索任务</span>
         <input type="search" data-model-search value="${esc(s.query)}" placeholder="名称、用途或任务键"></label>
-      <div class="model-switches" role="group" aria-label="配置作用域">${[["role", "角色默认"], ["window", windowLabel(s)]].map(([layer, label]) => `<button type="button" data-model-layer="${layer}" aria-pressed="${s.layer === layer}" class="${s.layer === layer ? "active" : ""}" ${s.busy || s.loading ? "disabled" : ""}>${label}</button>`).join("")}</div>
+      <div class="model-switches" role="group" aria-label="配置作用域">${[["role", "角色默认"], ["window", windowLabel(s)]].map(([layer, label]) => `<button type="button" data-model-layer="${layer}" aria-pressed="${s.layer === layer}" class="${s.layer === layer ? "active" : ""}" ${s.busy || s.loading || layer === "window" && !windowAvailable ? "disabled" : ""}>${label}</button>`).join("")}${modelScopeHint(s)}</div>
       <label class="model-provider-filter"><span>模型提供方</span><select data-model-provider-filter aria-label="按模型提供方筛选">
         <option value="" ${s.providerFilter ? "" : "selected"}>全部提供方</option>${(s.status?.providers || []).map(provider => `<option value="${esc(provider.id)}" ${s.providerFilter === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}</select></label>
       <div class="model-switches" role="group" aria-label="视图">${[["tasks", "按任务"], ["providers", "按提供方"]].map(([id, label]) => `<button type="button" data-model-view="${id}" aria-pressed="${s.view === id}" class="${s.view === id ? "active" : ""}">${label}</button>`).join("")}</div>
@@ -405,10 +421,6 @@ window.CompanionModelsPage = (() => {
     const selected = draft.inherited[name] ? task.fields[name].inherited_value : draft.values[name];
     return `${name === "fallback" ? '<option value="">不使用备用模型</option>' : ''}${providers.map(provider => `<option value="${esc(provider.id)}" ${selected === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}
       ${selected && !providers.some(p => p.id === selected) ? `<option value="${esc(selected)}" selected>${esc(selected)} · 当前不可用</option>` : ""}`; }
-  function sourceCell(s, task, draft) { const field = task.fields.provider;
-    if (draft.inherited.provider) return `<span class="model-source inherit">跟随 ${esc(configSource(field.inherited_source || "default"))}</span>`;
-    if (field.explicit) return `<span class="model-source own">${draft.layer === "role" ? "角色单独设置" : windowLabel(s) + "单独设置"}</span>`;
-    return `<span class="model-source pending">待保存</span>`; }
   function conflictNotice(task, draft) {
     if (!draft.stale) return "";
     const value = field => String(field ?? "").slice(0, 200) || "空";
@@ -433,7 +445,7 @@ window.CompanionModelsPage = (() => {
       <div class="model-sc-ft"><code>${esc(task.kind)}</code><span class="model-grow"></span>
         ${draft.stale && !draft.pending ? `<button type="button" class="button small" data-model-action="rebase" data-model-kind="${esc(task.kind)}">已核对，保留草稿</button>` : ""}
         <button type="button" class="button small" data-model-action="discard" data-model-kind="${esc(task.kind)}" ${locked || draft.pending ? "disabled" : ""}>放弃</button>
-        <button type="button" class="button small primary" data-model-action="save-one" data-model-kind="${esc(task.kind)}" ${locked || (!draft.pending && (draft.stale || !dirty(task, draft))) ? "disabled" : ""}>${draft.pending ? "核对保存" : "保存"}</button>
+        <span class="wb-save-context"><button type="button" class="button small primary" data-model-action="save-one" data-model-kind="${esc(task.kind)}" ${locked || (!draft.pending && (draft.stale || !dirty(task, draft))) ? "disabled" : ""}>${draft.pending ? "核对保存" : "保存"}</button>${modelScopeHint(s, task, draft)}</span>
       </div></article>`;
   }
   function fnCard(s, task) { const info = taskName(task.kind), draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied;
@@ -474,7 +486,6 @@ window.CompanionModelsPage = (() => {
           ${fields.map(name => `<label><input type="checkbox" data-model-inherit="${name}" data-model-kind="${esc(task.kind)}" ${draft.inherited[name] ? "checked" : ""} ${fieldLocked ? "disabled" : ""}>${esc(fieldLabel[name])}</label>`).join("")}</div>
       </div>
       <div class="model-sc-rf">
-        <div class="r"><b>来源</b><span>${sourceCell(s, task, draft)}</span></div>
         <div class="r"><b>当前使用</b><span class="model-mono">${esc(main || "未设置")}${fallback ? " → " + esc(fallback) : ""}</span></div>
         <div class="r"><b>采用</b><span class="model-state ${draft?.pending ? "warn" : ""}">${esc(draft?.pending ? "待核对原保存" : adoption(task.application_state))}</span></div>
       </div>
@@ -484,7 +495,7 @@ window.CompanionModelsPage = (() => {
         <span class="model-grow"></span>
         ${draft.stale && !draft.pending ? `<button type="button" class="button small" data-model-action="rebase" data-model-kind="${esc(task.kind)}">已核对，保留草稿</button>` : ""}
         <button type="button" class="button small" data-model-action="discard" data-model-kind="${esc(task.kind)}" ${locked || draft.pending ? "disabled" : ""}>放弃</button>
-        <button type="button" class="button small primary" data-model-action="save-one" data-model-kind="${esc(task.kind)}" ${locked || (!draft.pending && (draft.stale || !dirty(task, draft))) ? "disabled" : ""}>${draft.pending ? "核对保存" : "保存"}</button>
+        <span class="wb-save-context"><button type="button" class="button small primary" data-model-action="save-one" data-model-kind="${esc(task.kind)}" ${locked || (!draft.pending && (draft.stale || !dirty(task, draft))) ? "disabled" : ""}>${draft.pending ? "核对保存" : "保存"}</button>${modelScopeHint(s, task, draft)}</span>
       </div>
     </article>`; }
   function taskCards(s) { const rows = visible(s); if (!rows.length) return '<p class="model-empty">没有匹配的任务。</p>';
@@ -515,7 +526,7 @@ window.CompanionModelsPage = (() => {
     if (save && task && draft) { save.disabled = !draft.pending && (draft.stale || !dirty(task, draft)); save.textContent = draft.pending ? "核对保存" : "保存"; } }
   /* ---------- functional actions ---------- */
   async function refresh() { const s = state, ticket = version; if (!s || s.loading || s.busy) return; s.loading = true; s.notice = "正在读取任务配置…"; render();
-    try { const data = await api("GET", path, {layer: s.layer || "role"}, TASK_CONFIG_TIMEOUT_MS); if (!current(ticket, s)) return; setStatus(s, data); s.bad = false; s.denied = false; s.notice = "已读取当前任务配置。"; }
+    try { const data = await api("GET", taskPath, {layer: s.layer || "role"}, TASK_CONFIG_TIMEOUT_MS); if (!current(ticket, s)) return; setStatus(s, data); s.bad = false; s.denied = false; s.notice = "已读取当前任务配置。"; }
     catch (err) { if (!current(ticket, s)) return;
       /* 失败后的页面只能显示错误与重试入口，不能把上一次的任务路由、Provider
          和可编辑草稿继续当成当前真实配置。未提交草稿和待核对保存仍保留，
@@ -529,7 +540,7 @@ window.CompanionModelsPage = (() => {
       s.bad = true; s.denied = false; s.notice = fail(err, "无法读取任务配置，请点击重新读取。"); }
     finally { s.loading = false; if (current(ticket, s)) render(); } }
   async function reloadConflict(s, ticket) {
-    const data = await api("GET", path, {layer: s.layer || "role"}, TASK_CONFIG_TIMEOUT_MS);
+    const data = await api("GET", taskPath, {layer: s.layer || "role"}, TASK_CONFIG_TIMEOUT_MS);
     if (!current(ticket, s)) return false;
     setStatus(s, data); s.denied = false;
     const conflict = snapshot(s).find(task => s.drafts.get(task.kind)?.stale && !s.drafts.get(task.kind)?.pending);
@@ -705,10 +716,10 @@ window.CompanionModelsPage = (() => {
     const layer = event.target.closest("[data-model-layer]");
     if (layer) {
       const selectedLayer = layer.dataset.modelLayer;
-      if (selectedLayer === s.layer) return;
+      if (selectedLayer === s.layer || selectedLayer === "window" && !windowAvailable) return;
       const pending = [...s.drafts.entries()].some(([kind, draft]) => draft.pending || taskOf(s, kind) && dirty(taskOf(s, kind), draft));
       if (pending) { s.bad = true; s.notice = "请先保存或放弃当前范围的改动，再切换配置作用域。"; render(); return; }
-      s.layer = selectedLayer; s.drafts.clear(); s.selection = []; s.expanded = null; refresh(); return;
+      s.layer = selectedLayer; s.status = null; s.drafts.clear(); s.selection = []; s.expanded = null; refresh(); return;
     }
     const lane = event.target.closest("[data-model-lane]");
     if (lane) { s.lane = lane.dataset.modelLane; render(); return; }
@@ -1136,8 +1147,15 @@ window.CompanionModelsPage = (() => {
       return '<div class="model-alert">当前接入方式是「远程 HTTP 服务」，但地址以 <code>/v1/chat/completions</code> 结尾。请改为 <code>/v1/systemone</code>，或切换到「OpenAI 兼容网关」；后端会拒绝这种跨协议配置。</div>';
     return ""; }
   async function layaRefresh(s) { const l = s.laya, ticket = version; if (l.loading) return; l.loading = true; l.notice = "正在读取 Laya 配置…"; render();
-    try { const [data, history] = await Promise.all([api("GET", path + "/laya"), api("GET", path + "/laya/logs")]); if (!current(ticket, s)) return;
-      if (!layaDirty(l) || l.stale) l.draft = layaDraftFrom(data); l.data = {...data, decision_fields: layaDraftFrom(data).decision_fields}; l.logs = history.events || []; l.loaded = true; l.stale = false; l.bad = false; l.notice = "已读取 Laya 接入状态与近期记录。"; }
+    try { const [config, history] = await Promise.allSettled([api("GET", path + "/laya"), api("GET", path + "/laya/logs")]); if (!current(ticket, s)) return;
+      if (config.status === "rejected") throw config.reason;
+      const data = config.value;
+      if (!layaDirty(l) || l.stale) l.draft = layaDraftFrom(data); l.data = {...data, decision_fields: layaDraftFrom(data).decision_fields};
+      l.logs = history.status === "fulfilled" ? history.value.events || [] : [];
+      l.logsUnavailable = history.status === "fulfilled" && history.value.available === false;
+      l.logsError = history.status === "rejected";
+      l.loaded = true; l.stale = false; l.bad = false;
+      l.notice = l.logsError ? "Laya 配置已读取；近期记录暂不可用。" : "已读取 Laya 接入状态。"; }
     catch (err) { if (!current(ticket, s)) return; l.bad = true; l.notice = fail(err, "无法读取 Laya 配置。"); }
     finally { l.loading = false; if (current(ticket, s)) render(); } }
   async function layaSave(s) { const l = s.laya; if (l.busy || l.loading || !l.data || l.stale || !layaDirty(l)) return;
@@ -1191,7 +1209,11 @@ window.CompanionModelsPage = (() => {
       /* 先把失败原因画出来，再补拉运行记录；日志读取慢时用户也不会一直停在等待态。 */
       render(); await layaRefreshQuiet(s, ticket); }
     finally { l.busy = false; if (current(ticket, s)) render(); } }
-  async function layaRefreshQuiet(s, ticket) { try { const [data, history] = await Promise.all([api("GET", path + "/laya"), api("GET", path + "/laya/logs")]); if (current(ticket, s)) { s.laya.data = data; s.laya.draft = layaDraftFrom(data); s.laya.logs = history.events || []; } } catch {} }
+  async function layaRefreshQuiet(s, ticket) { const [config, history] = await Promise.allSettled([api("GET", path + "/laya"), api("GET", path + "/laya/logs")]);
+    if (!current(ticket, s)) return;
+    if (config.status === "fulfilled") { s.laya.data = config.value; s.laya.draft = layaDraftFrom(config.value); }
+    if (history.status === "fulfilled") { s.laya.logs = history.value.events || []; s.laya.logsUnavailable = history.value.available === false; s.laya.logsError = false; }
+    else s.laya.logsError = true; }
   /* ---------- DeepSeek search binding ---------- */
   const searchDirty = x => !!x.data && !!x.draft
     && (x.draft.deepseek_provider_id !== x.data.deepseek_provider_id
@@ -1280,6 +1302,8 @@ window.CompanionModelsPage = (() => {
       meta.push("当前服务未返回行动概率，阈值未强制执行");
     return `<div class="model-laya-result"><b>决策结果${meta.length ? ` · ${esc(meta.join(" · "))}` : ""}</b><code>${esc(JSON.stringify(decision, null, 2))}</code></div>`; }
   function layaHistoryMarkup(l) { const events = Array.isArray(l.logs) ? l.logs : [];
+    if (l.logsError) return '<p class="model-laya-history-empty">近期记录暂不可用；Laya 配置仍可查看和保存。</p>';
+    if (l.logsUnavailable) return '<p class="model-laya-history-empty">当前群聊的近期决策记录暂不能按会话汇总；全局 Laya 配置仍可在此管理。</p>';
     if (!events.length) return '<p class="model-laya-history-empty">暂无 Laya 调用记录。</p>';
     const labels = {ok: "成功", skipped: "跳过", failed: "失败"}, sources = {conversation: "实际对话", dashboard_preview: "页面预览", probe: "连接测试"};
     const diagnostic = (label, value, empty) => `<div><small>${label}</small><code>${value == null ? empty : esc(JSON.stringify(value, null, 2))}</code></div>`;
@@ -1295,7 +1319,15 @@ window.CompanionModelsPage = (() => {
         : '<small>该记录生成于详细诊断字段启用前。</small>';
       return `<li data-state="${esc(event.status)}"><details><summary><span><strong>${esc(labels[event.status] || event.status)}</strong><small>${esc(time)} · ${esc(sources[event.source] || event.source || "未知来源")} · ${esc(event.mode)}</small></span><b>${event.elapsed_ms == null ? "—" : esc(event.elapsed_ms) + " ms"}</b></summary><div><small>${esc(event.reason_code || "分类结果")}</small>${enabledMarkup}<code>${esc(detail)}</code>${diagnostics}</div></details></li>`;
     }).join("")}</ol>`; }
-  function layaPane(s) { const l = s.laya; if (!l.data) return `<div class="model-card"><p class="model-empty">${esc(l.notice || "正在读取 Laya 配置…")}</p></div>`;
+  function layaContextMarkup() { const product = window.CompanionProduct, currentTarget = product?.target?.();
+    if (!currentTarget) return "";
+    const selection = product.selection?.(), choices = (product.targets?.() || []).filter(item =>
+      item.roles?.some(role => role.role_id === selection?.role_id));
+    const label = product.targetLabel?.(currentTarget) || "当前会话";
+    return `<div class="model-laya-context"><span>当前会话</span>${choices.length > 1
+      ? `<select data-laya-target aria-label="切换查看会话">${choices.map(item => `<option value="${esc(item.target_id)}" ${item.target_id === currentTarget.target_id ? "selected" : ""}>${esc(product.targetLabel(item))}</option>`).join("")}</select>`
+      : `<strong>${esc(label)}</strong>`}</div>`; }
+  function layaPane(s) { const l = s.laya, context = layaContextMarkup(); if (!l.data) return `<div class="model-subpane model-laya-pane">${context}<div class="model-card"><p class="model-empty">${esc(l.notice || "正在读取 Laya 配置…")}</p></div></div>`;
     const dirty = layaDirty(l), installed = l.data.package_installed, mode = l.draft?.mode || l.data.mode;
     const gpuUnavailable = mode === "local" && l.data.local_runtime_state === "gpu_unavailable";
     const runtimeLabel = gpuUnavailable ? "CUDA 不可用" : mode === "local" ? "本地 Python" : mode === "jev" ? "OpenAI 兼容网关" : mode === "workers_ai" ? "Cloudflare Workers AI" : "远程 HTTP";
@@ -1309,7 +1341,7 @@ window.CompanionModelsPage = (() => {
       : mode === "remote" ? "远程管理" : l.data.model_cache_ready ? "已缓存" : "首次调用下载";
     const torchText = [l.data.torch_version, l.data.cuda_version ? `CUDA ${l.data.cuda_version}` : "无 CUDA"]
       .filter(Boolean).join(" · ");
-    return `<div class="model-subpane model-laya-pane">
+    return `<div class="model-subpane model-laya-pane">${context}
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">可选能力 · 语义决策</span><h3>Laya 决策模型</h3><p class="model-note">在回复前判断是否接话、等待、沉默及表达形式。配置全局生效；仅群聊候选进入 Laya 判断，私聊始终走 AstrBot 核心回复，另由回复页的私聊收尾判断在纯道别时安静。模型不输出时间、段数等数值；行动概率只用于下方可选的连续接话阈值，执行仍遵循宿主配置和权限。接入方式支持本地 Laya 包、远程 HTTP 服务、OpenAI 兼容网关与 Cloudflare Workers AI，四者共用同一份决策合同；Laya 与 TypeSafe 官方 Jev 都走 SystemOne。</p></div><button type="button" class="button small" data-laya-refresh ${l.loading || l.busy ? "disabled" : ""}>刷新</button></div>
         <div class="model-kpis">${kpi(!l.data.enabled ? "未启用" : mode === "local" && l.data.local_runtime_state === "warming" ? "正在预热" : "已启用", "运行状态", l.data.enabled ? "g" : "a")}${kpi(packageKpi, mode === "local" ? "Python 包" : "依赖来源")}${kpi(modelKpi, mode === "jev" || mode === "workers_ai" ? "判断模型" : "模型权重")}${kpi(runtimeLabel, "接入方式", gpuUnavailable ? "r" : "")}</div>
         ${gpuUnavailable ? `<div class="model-alert"><b>本地 Laya 当前不可用：</b>当前 AstrBot Python 使用的是 CPU 版 PyTorch${torchText ? `（${esc(torchText)}）` : ""}。Laya 本地模式需要 CUDA；请安装与驱动匹配的 CUDA 版 PyTorch 后重启 AstrBot，或在上方把接入方式切到「远程 HTTP 服务」或「OpenAI 兼容网关」。
@@ -1337,9 +1369,13 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
         <div class="model-state">上游源码与版本：<a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">NandhaKishorM/laya</a> · <a href="https://huggingface.co/convaiinnovations/laya-multilingual" target="_blank" rel="noreferrer">Multilingual 权重</a></div>
       </div>`}
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">调用预览</span><h3>测试一次语义决策</h3></div></div><label class="model-fd"><span class="model-cap">测试消息<em>只提交这段文字与固定的文本类型事实</em></span><textarea data-laya-preview rows="4" ${l.busy || l.loading ? "disabled" : ""}>${esc(l.previewText || "")}</textarea></label><div class="model-editor-actions"><button type="button" class="button primary" data-laya-decide ${l.busy || l.loading || !l.data.enabled ? "disabled" : ""}>调用 Laya</button></div>${l.preview ? layaResult(l.preview) : ""}</div>
-      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">运行记录 · 最近 50 条</span><h3>Laya 调用日志</h3></div></div>${layaHistoryMarkup(l)}</div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">${l.logsUnavailable ? "当前会话" : "运行记录 · 最近 50 条"}</span><h3>Laya 调用日志</h3></div></div>${layaHistoryMarkup(l)}</div>
     </div>`; }
   function layaInput(s, event) { const l = s.laya, t = event.target;
+    if (event.type === "change" && t.matches("[data-laya-target]")) {
+      const product = window.CompanionProduct, roleId = product?.selection?.()?.role_id;
+      if (roleId) void product.choose(t.value, roleId);
+      return; }
     if (t.matches("[data-laya-preview]")) { l.previewText = t.value; return; }
     if (t.matches("[data-laya-decision]") && l.draft) { l.draft.decision_fields[t.dataset.layaDecision] = t.checked; if (event.type === "change") { l.bad = false; render(); } return; }
     const key = t.dataset.layaField; if (!key || !l.draft || l.loading || l.busy) return;
@@ -2202,9 +2238,10 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
   function timeText(rule) { const window = rule.time_window; if (!window || typeof window !== "object") return "";
     return `${window.start || ""}-${window.end || ""}`; }
   /* ---------- replacement policy: markup ---------- */
-  /* The policy pane always has an active task: the explicit pick, else the first. */
-  const policyTask = s => snapshot(s).filter(task => !coreReply(task)).find(task => task.kind === s.pol)
-    || snapshot(s).find(task => !coreReply(task)) || null;
+  /* The policy pane always has an active task: the explicit pick, else the first.
+     对话回复也在列表里：纯时段规则由宿主在核心管线按轮临时切换 Provider。 */
+  const policyTask = s => snapshot(s).find(task => task.kind === s.pol)
+    || snapshot(s)[0] || null;
   function ruleCard(s, task, rule, index) {
     const info = taskName(task.kind), draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied || draft?.pending;
     const providers = available(s, task), picked = typeof rule.provider_id === "string" ? rule.provider_id : "";
@@ -2247,7 +2284,7 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
       </div>
       ${Array.isArray(rule.keywords) && rule.keywords.length ? `<div class="model-chips">${rule.keywords.map(word => `<span class="model-kchip">${esc(word)}</span>`).join("")}</div>` : ""}
       <p class="model-rule-src">${esc(info.label)} · ${esc(task.kind)}</p></li>`; }
-  function policyTaskOptions(s, picked) { return snapshot(s).filter(task => !coreReply(task)).map(task => {
+  function policyTaskOptions(s, picked) { return snapshot(s).map(task => {
     const info = taskName(task.kind), count = ruleOf(s, task.kind).length;
     return `<option value="${esc(task.kind)}" ${task.kind === picked?.kind ? "selected" : ""}>${esc(info.label)} · ${esc(task.kind)}${count ? " · ${count} 条规则" : ""}</option>`;
   }).join(""); }
@@ -2317,11 +2354,12 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
       <div class="model-policy-foot">命中后使用备用模型重试一次</div></article>`; }
   function replacementPolicy(s) { const task = policyTask(s), draft = task && s.drafts.get(task.kind);
     const rules = task ? ruleOf(s, task.kind) : [];
-    const modes = [["kw", "关键词换模"], ["peak", "高价时段替代"], ["refuse", "拒答替代"]];
+    const modes = coreReply(task) ? [["kw", "关键词换模"], ["peak", "高价时段替代"]]
+      : [["kw", "关键词换模"], ["peak", "高价时段替代"], ["refuse", "拒答替代"]];
     const scope = task && draft ? effective(task, draft, "replacement_scope") : "all";
     const locked = !task || s.busy || s.loading || s.denied || draft?.pending;
     const scopes = [["plugin", "仅插件调用"], ["conversation", "仅普通对话模型"], ["all", "全部生效"]];
-    const panel = s.pm === "peak" ? peakPolicy(s) : s.pm === "refuse" ? refusalPolicy(s) : keywordPolicy(s);
+    const panel = s.pm === "peak" ? peakPolicy(s) : s.pm === "refuse" && !coreReply(task) ? refusalPolicy(s) : keywordPolicy(s);
     const status = s.loading || (s.notice && s.notice !== "已读取当前任务配置。") ? notice(s) : "";
     return `<div class="model-subpane model-policy">
       <div class="model-policy-bar">
@@ -2348,7 +2386,7 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
   const ruleTarget = ref => { const [kind, index] = String(ref || "").split(":"); return { kind, index: Number(index) }; };
   /* Every rule edit funnels through here so the JSON the gateway reads stays canonical. */
   function editRules(s, kind, mutate) { const task = taskOf(s, kind), draft = s.drafts.get(kind);
-    if (!task || coreReply(task) || !draft || draft.pending || s.busy || s.loading) return;
+    if (!task || !draft || draft.pending || s.busy || s.loading) return;
     const rules = ruleOf(s, kind).slice(); if (mutate(rules) === false) return;
     draft.values.replacement_rules = serializeRules(rules); draft.inherited.replacement_rules = false; draft.touched = true;
     s.bad = false; s.notice = `${taskName(kind).label} 的替换规则已改动，保存本任务后生效。`; render(); }
@@ -2455,7 +2493,7 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     ruleInput(s, event); }
   function fnPane(s) { const sub = s.sub === "map" ? situationMap(s) : s.sub === "pol" ? replacementPolicy(s) : cfgPane(s);
     return `${topbar(s)}${subtabBar(s)}${sub}`; }
-  function pane(s) { if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); if (s.tab === "search") return searchPane(s); if (s.tab === "laya") return layaPane(s); return fnPane(s); }
+  function pane(s) { if (s.tab !== "fn" && !path) return `<p class="model-empty">当前角色只有群聊模型入口，此处的模型连接服务暂不可用。功能模型仍可设置角色默认与本群覆盖。</p>`; if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); if (s.tab === "search") return searchPane(s); if (s.tab === "laya") return layaPane(s); return fnPane(s); }
   function drawer(s) { const id = s.drawer; if (!id) return "";
     const provider = s.status?.providers.find(p => p.id === id); if (!provider) return "";
     const tasks = snapshot(s), asMain = tasks.filter(t => providerFor(t, s.drafts.get(t.kind)) === id);
@@ -2477,9 +2515,10 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     if (s.tab === "search") { searchInput(s, event); return; }
     if (s.tab === "laya") { layaInput(s, event); return; }
     fnInput(event); }
-  function click(event) { const s = state; if (!s || !root?.isConnected) return;
+  function click(event) { if (window.CompanionWorkbench.scopeHintClick(event)) return; const s = state; if (!s || !root?.isConnected) return;
     const tab = event.target.closest("[data-model-tab]");
     if (tab) { const id = tab.dataset.modelTab; if (s.tab !== id) { s.tab = id;
+        if (id !== "fn" && !path) { render(); return; }
         if (id === "voice" && !state.voice.loaded) voiceRefresh(s); else if (id === "image" && !state.image.loaded) imageRefresh(s); else if (id === "search" && !state.search.loaded) searchRefresh(s); else if (id === "laya" && !state.laya.loaded) layaRefresh(s);
         render(); } return; }
     if (s.tab === "voice") { voiceClick(s, event); return; }
@@ -2488,6 +2527,7 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     if (s.tab === "laya") { layaClick(s, event); return; }
     fnClick(event); }
   function providerHover(event) {
+    window.CompanionWorkbench.scopeHintReset(event);
     const s = state; if (!s || !root?.isConnected) return;
     const pill = event.target.closest?.("[data-provider-pill]");
     if (event.type === "pointerover") {
@@ -2503,9 +2543,9 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
       item.classList.toggle("is-hovered", !!s.hoverProvider && item.dataset.providerPill === s.hoverProvider));
   }
   /* ---------- lifecycle ---------- */
-  function unmount() { version++; if (root) { root.removeEventListener("input", input); root.removeEventListener("change", input); root.removeEventListener("click", click); root.removeEventListener("pointerover", providerHover); root.removeEventListener("pointerout", providerHover); }
+  function unmount() { version++; if (root) { window.CompanionWorkbench.dismissScopeHints(root); root.removeEventListener("input", input); root.removeEventListener("change", input); root.removeEventListener("click", click); root.removeEventListener("pointerover", providerHover); root.removeEventListener("pointerout", providerHover); root.removeEventListener("keydown", window.CompanionWorkbench.scopeHintKeydown); root.removeEventListener("focusin", window.CompanionWorkbench.scopeHintReset); root.removeEventListener("focusout", window.CompanionWorkbench.scopeHintReset); }
     if (state) { state.loading = false; state.busy = false; }
-    root = null; state = null; path = key = null; }
+    root = null; state = null; path = taskPath = key = null; }
   function mount(element, options = {}) { unmount(); root = element; if (!root) return; const product = window.CompanionProduct;
     /* 这里原先先判断 hosted()，桥还没注入时直接写「从 AstrBot 管理界面打开陪伴小屋后…」。
        桥的注入晚于脚本执行是正常时序，所以那句话在正经的拓展页里也出现过。
@@ -2518,9 +2558,15 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
         : "角色与会话目录暂未读到，请稍后重新读取。";
       root.innerHTML = `<div class="model-empty">${message}<div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button><button class="button small" type="button" data-go="manage" data-manage="host">账号与会话</button></div></div>`; return;
     }
-    /* path 是每一次请求的基址（model_api + /configure、/voice、/tts/providers…），
-       也是 localStorage 键的一部分。桥要插件相对路径，所以切掉插件目录名。 */
-    path = endpoint.slice(PREFIX.length); key = "companion-model-edit.v2:" + JSON.stringify([identity.installation_id, identity.operator_id, path]);
+    /* 任务配置跟随显式窗口；其他模型服务使用当前角色提供的完整接口。 */
+    taskPath = endpoint.slice(PREFIX.length);
+    const owner=product.roleTarget?.(),selected=product.role?.();
+    const roleEndpoint=owner?.roles?.find(item=>item.role_id===selected?.role_id)?.model_api;
+    path = !Object.hasOwn(options,"endpoint") && owner?.scope_kind === "group" ? null
+      : !Object.hasOwn(options,"endpoint") && roleEndpoint?.startsWith(PREFIX)
+        ? roleEndpoint.slice(PREFIX.length) : taskPath;
+    windowAvailable=Object.hasOwn(options,"endpoint") || !product.selection || Boolean(product.selection()?.target_id);
+    key = "companion-model-edit.v2:" + JSON.stringify([identity.installation_id, identity.operator_id, taskPath, windowAvailable]);
     state = states.get(key) || { status: null, drafts: new Map(), selection: [], expanded: null, layer: "role", view: "tasks", custom: null, lane: "all", providerFilter: null, query: "", sub: "map", cm: "precise", av: "slot", af: "all", pm: "kw", slotDraft: {}, providerTests: {}, testing: new Set(),
       drawer: null, expOpen: {}, pol: null, rule: { query: "", picked: [], report: null, testing: false }, peak: { on: true, provider: "", start: "09:00", end: "12:00", windows: "09:00-12:00\n14:00-18:00" },
       tab: "fn",
@@ -2533,14 +2579,14 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
       laya: { data: null, draft: null, logs: [], loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" },
       search: { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" },
       loading: false, busy: false, bad: false, denied: false, notice: "" };
-    state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set();
+    state.layer ||= "role"; if(!windowAvailable)state.layer="role"; state.providerTests ||= {}; state.testing ||= new Set();
     /* 展开状态按对象保存：刷新、切任务、切页回来都保持上次展开的分组，
        不再每次回到“全收起”或“全展开”。 */
     state.expOpen = { ...restoreExpanded(key), ...(state.expOpen || {}) }; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTestKeys ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
     states.set(key, state);
     state.sub = ["map", "cfg", "pol"].includes(options.sub) ? options.sub : "map";
-    root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
-    if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "search" && !state.search.loaded) searchRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
+    root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); root.addEventListener("keydown", window.CompanionWorkbench.scopeHintKeydown); root.addEventListener("focusin", window.CompanionWorkbench.scopeHintReset); root.addEventListener("focusout", window.CompanionWorkbench.scopeHintReset); render();
+    if (state.tab && state.tab !== "fn") { if (!path) { render(); return; } if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "search" && !state.search.loaded) searchRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
     else { refresh().catch(() => {}); } }
   /* Only the mounted scope can block navigation. Retained drafts belonging to
      another role or a closed page must not trigger a warning on every route. */

@@ -3,9 +3,10 @@
 ## 已核验的来源
 
 - 维护仓库：[RitsuYi/astrbot_plugin_private_companion](https://github.com/RitsuYi/astrbot_plugin_private_companion)，唯一发布分支 `weixin`。
-- 当前版本：`7.1.8+weixin.2`，原作者为 [menglimi](https://github.com/menglimi)。
+- 当前版本：`7.2.6+weixin.2`，原作者为 [menglimi](https://github.com/menglimi)。
 - 作者仓库：[原始来源](https://github.com/menglimi/astrbot_plugin_private_companion)。
-- 本次锁定作者基线：`7e602dac2d8f9c310bf0e23de55d9c93f029aad1`；接手提交：`e7d6029ae72e813cf84a8c3c279ba46ec506a8c5`。
+- 本次锁定作者基线：`2436eea3a8c97b177d38466a7657631e6a020e68`（v7.2.6）；接手提交：`e7d6029ae72e813cf84a8c3c279ba46ec506a8c5`。
+- 一次升级的固定步骤与微信适配清单见 `PROCESS.md`。
 - `UPSTREAM_BASELINE.json` 记录原始交付 ZIP、接手 ZIP、bundle 的校验值及来源提交。
   原始插件 ZIP 未在本次本机重新取得，其校验值来自已核验的接手清单。
 
@@ -88,3 +89,13 @@ Git 数据、bundle、维护/恢复工具、CMD、开发虚拟环境、真实配
 目标 `7e602dac2d8f9c310bf0e23de55d9c93f029aad1`；从 `7.1.6+weixin.2` 普通三方合并为 `7.1.8+weixin.2`。旧接手验证仅证明旧 R2；本次验证见 [7.1.8 微信版验证记录](docs/WEIXIN_OC_7_1_8_VALIDATION.md)，原始测试证据保留在仓库外。
 
 最初仅交付安装 ZIP。用户于 2026-11-09 反馈安装后已验证可用，并明确授权同步 GitHub `weixin` 分支；维护方未直接操作真实微信账号，具体实机验收项未逐项记录。同步采用普通快进推送，完成状态以远端完整 SHA 和关键文件回读核验为准。本次同步不改变插件运行逻辑、版本号或已交付 ZIP。
+
+## 2026-11-21 的 7.2.6 升级
+
+用户报告微信版为 `7.1.8+weixin.2`，要求同步作者最新 `7.2.6`。目标提交 `2436eea3a8c97b177d38466a7657631e6a020e68`，从 `7.1.8+weixin.2` 普通三方合并为 `7.2.6+weixin.2`；旧基线 `7e602dac2d8f9c310bf0e23de55d9c93f029aad1`。
+
+- 上游 7.2.6 新增原生 `weixin_oc` 支持（`weixin-user:` 命名空间）与新连接管理 `NativeAccountConnections`；
+  本维护版保留 R2 的 `weixin-oc-user:` 命名空间与 `platform.client` 直读，避免改变既有绑定、人格与记忆归属。
+- 冲突文件先取上游版本，再逐项重放 R2 适配；`.github/workflows/ci.yml` 继续 `git rm` 保持发布过滤，不跟踪作者 CI。
+- 客户端被替换的语义改由上游 generation 承担：旧 lease 失效（`host_connection_changed`），重登后的新客户端可继续接收下一条事件。
+- 验证见 [7.2.6 微信版验证记录](docs/WEIXIN_OC_7_2_6_VALIDATION.md)。本次只交付安装 ZIP，未修改运行中的 AstrBot；真实微信登录与收发：**未实测**。

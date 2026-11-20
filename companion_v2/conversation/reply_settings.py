@@ -418,6 +418,7 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
               "reply_diagnostic_limit": (10, 300),
               **GROUP_AIR_LIMITS, **GROUP_CONTINUATION_LIMITS, **PRIVATE_CLOSING_LIMITS,
               **PRIVATE_DEBOUNCE_LIMITS, **GROUP_WAKEUP_LIMITS, **OUTBOUND_LIMITS}
+    limits.update({"voice_probability": (0, 1), "voice_primary_mention_probability": (0, 1)})
     limits["context_image_caption_max_items"] = (0, 8)
     limits.update(UNDERSTANDING_LIMITS)
     limits.update({"private_image_vision_cache_max_items": (0, 2000),
@@ -479,7 +480,7 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
         if not identifiers:
             return {}
         placeholders = ",".join("?" for _ in identifiers)
-        rows = self.runtime.read_all(f"""SELECT field_id, value_json, revision, target_json FROM (
+        rows = self.store.read_all(f"""SELECT field_id, value_json, revision, target_json FROM (
                 SELECT v.field_id, v.value_json, v.revision, t.target_json,
                     ROW_NUMBER() OVER (PARTITION BY v.field_id ORDER BY t.updated_at DESC, t.target_key DESC) AS rank
                 FROM configuration_values v JOIN configuration_targets t USING (target_key)
@@ -516,7 +517,7 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
         if (not field_ids or target.layer is not ConfigLayer.WINDOW or scope is None
                 or scope.kind is not ScopeKind.GROUP or target.role is None):
             return
-        rows = self.runtime.read_all("""SELECT target_key FROM configuration_targets
+        rows = self.store.read_all("""SELECT target_key FROM configuration_targets
             WHERE json_extract(target_json, '$.layer') = 'window'
               AND json_extract(target_json, '$.role_id') = ?
               AND json_extract(target_json, '$.scope.platform') = ?
@@ -529,7 +530,7 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
             (target.role.subject_id, scope.platform, scope.native_scope_id, scope.bot_id,
              scope.account_id, scope.session_id, scope.conversation_id))
         placeholders = ",".join("?" for _ in field_ids)
-        with self.runtime.transaction() as connection:
+        with self.store.transaction() as connection:
             for row in rows:
                 cursor = connection.execute(
                     f"DELETE FROM configuration_values WHERE target_key = ? AND field_id IN ({placeholders})",
@@ -578,7 +579,8 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
                     groups_key: replace(groups, value="\n".join(selected),
                         source=legacy.source, explicit=legacy.explicit,
                         source_revision=legacy.source_revision)})
-        return snapshot
+        from companion_v2.relationships.account_link_settings import overlay_snapshot
+        return overlay_snapshot(self.runtime, target, fields, snapshot)
 
     def preview_set(self, target, fields, *, changes):
         target = self._stable_group_target(target)
@@ -594,7 +596,7 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
         normalized = dict(changes)
         if RULES_FIELD in normalized:
             normalized[RULES_FIELD] = True
-        with self.runtime.transaction():
+        with self.store.transaction():
             result = super().write(target, fields, changes=normalized, reset=reset,
                 expected_revision=expected_revision, observed_at=observed_at)
             self._clear_legacy_group_values(target, reset)

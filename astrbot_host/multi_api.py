@@ -12,6 +12,7 @@ from .memory_api import MemoryWebAPI, PREFIX as MEMORY_PREFIX
 from .state_api import StateWebAPI, PREFIX as STATE_PREFIX
 from .reply_api import ReplyWebAPI, PREFIX as REPLY_PREFIX
 from .configuration_api import ConfigurationWebAPI, PREFIX as CONFIGURATION_PREFIX, SECTIONS
+from .config_port_api import ConfigPortWebAPI
 from .model_api import ModelWebAPI, PREFIX as MODEL_PREFIX
 from .life_api import LifeWebAPI, PREFIX as LIFE_PREFIX
 from .relationships_api import RelationshipWebAPI, MANAGEMENT_PREFIX as RELATIONSHIP_PREFIX
@@ -22,6 +23,7 @@ from .group_memory_api import GroupMemoryWebAPI
 from .group_model_api import GroupModelWebAPI
 from .group_reply_api import GroupReplyWebAPI
 from .page_api import PageWebAPI
+from .log_api import LogWebAPI
 from .acquaintance_api import AcquaintanceWebAPI
 from .integration_api import IntegrationWebAPI
 from .semantic_api import SemanticWebAPI
@@ -41,6 +43,7 @@ from .image_material_api import ImageMaterialsWebAPI, PREFIX as IMAGE_MATERIAL_P
 from .qzone_api import QzoneWebAPI, PREFIX as QZONE_PREFIX
 from .host_options_api import HostOptionsWebAPI
 from .storage_api import StorageWebAPI
+from .works_api import WorksWebAPI
 from .display_names import display_names
 from .identity_derivation import role_display_name
 from .role_paths import HOST_PREFIX as PREFIX, role_legacy_paths
@@ -54,6 +57,10 @@ INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact", "reaction", "budget"
                                        "private_access_installation")
 TARGET_CONFIGURATION_SECTIONS = tuple(name for name in SECTIONS
     if name not in INSTALLATION_CONFIGURATION_SECTIONS)
+# Group windows have no private scope, but role-owned fixed prompt blocks still
+# need a route when the role only exists in a group. Do not expose window or
+# relationship editors through that group path.
+GROUP_CONFIGURATION_SECTIONS = ("system.prompts",)
 
 
 def configuration_routes(reply_route, view, *, allowed_sections=None):
@@ -154,8 +161,9 @@ class MultiHostWebAPI:
         settings = self.controller.settings
         if settings is None:
             return []
-        # 角色级配置路由只在私聊目标上注册；群目标打开角色档案/系统提示词时，
-        # 借同一个角色同一个 Bot 的私聊路由，不能给一个永远 404 的群路径。
+        # 角色级配置路由优先借同一个角色同一个 Bot 的私聊目标；只有群目标的
+        # 角色也不能让系统提示词页面变成死路，因此保留一条仅含 system.prompts
+        # 的群内角色路由（见 GROUP_CONFIGURATION_SECTIONS）。
         private_roles = {}
         for candidate in settings.all_targets:
             if isinstance(candidate, GroupTarget):
@@ -164,10 +172,7 @@ class MultiHostWebAPI:
                 if persona.bot_id == candidate.bot_id:
                     private_roles.setdefault((candidate.bot_id, persona.role_id), candidate.target_id)
         inventory = [{**vars(target), "scope_kind": "group" if isinstance(target, GroupTarget) else "private",
-            "delivery_mode": settings.delivery_mode_for(target),
-            "group_delivery_authorization": (self.controller.authority.group_delivery.status(target)
-                if isinstance(target, GroupTarget) and self.controller.authority is not None
-                and self.controller.runtime is not None else None), "roles": [
+            "delivery_mode": settings.delivery_mode_for(target), "roles": [
             {"role_id": role, "persona_ids": [p.persona_id for p in settings.personas if p.bot_id == target.bot_id and p.role_id == role],
              "role_name": role_display_name(role, [p.persona_id for p in settings.personas
                                                     if p.bot_id == target.bot_id and p.role_id == role]),
@@ -178,13 +183,13 @@ class MultiHostWebAPI:
              "state_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/state"),
              "reply_api": PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/reply",
-             "config_api": ((PREFIX + "/targets/" + (
-                                private_roles[(target.bot_id, role)] if isinstance(target, GroupTarget)
+             "config_api": (PREFIX + "/targets/" + (
+                                private_roles[(target.bot_id, role)]
+                                if isinstance(target, GroupTarget) and (target.bot_id, role) in private_roles
                                 else target.target_id)
-                            + "/roles/" + digest(role) + "/config")
-                           if (not isinstance(target, GroupTarget)
-                               or (target.bot_id, role) in private_roles) else None),
-             "role_config_api": None,
+                            + "/roles/" + digest(role) + "/config"),
+             "role_config_api": (PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/config"
+                                 if isinstance(target, GroupTarget) else None),
              "model_api": PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/model",
              "perception_native_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/perception-native"),
@@ -324,6 +329,7 @@ class MultiHostWebAPI:
             (PREFIX + "/status", self.api_status, ["GET"], "Companion V2 multi-target status"),
             (PREFIX + "/performance", self.api_performance, ["GET"], "Companion V2 page performance mode"),
         ]
+        routes += LogWebAPI(self.controller).routes()
         lite_mode = performance_enabled(getattr(self.controller, "config", {}))
         self.controller._performance_mode_enabled = lite_mode
         if lite_mode:
@@ -343,6 +349,8 @@ class MultiHostWebAPI:
         routes += BackupWebAPI(self.controller).routes()
         routes += HostOptionsWebAPI(self.controller).routes()
         routes += StorageWebAPI(self.controller).routes()
+        routes += ConfigPortWebAPI(self.controller).routes()
+        routes += WorksWebAPI(self.controller).routes()
         # Installation-owned groups stay on one route, away from selected chats.
         routes += ConfigurationWebAPI(InstallationControllerView(self.controller),
             allowed_sections=INSTALLATION_CONFIGURATION_SECTIONS).routes()
@@ -352,9 +360,7 @@ class MultiHostWebAPI:
         routes.append((PREFIX + "/preview", self.api_preview, ["GET"], "Companion V2 conversation preview"))
         routes.append((PREFIX + "/batches", self.api_batches, ["GET"], "Companion V2 recent target batches"))
         for action, method in (("probe", "probe"), ("initialize", "initialize_profile"), ("start", "start"),
-                               ("stop", "stop"), ("authorize-delivery", "authorize_delivery"), ("revoke-delivery", "revoke_delivery"),
-                               ("authorize-group-delivery", "authorize_group_delivery"),
-                               ("revoke-group-delivery", "revoke_group_delivery")):
+                               ("stop", "stop"), ("authorize-delivery", "authorize_delivery"), ("revoke-delivery", "revoke_delivery")):
             routes.append((PREFIX + "/" + action, self.control(method, target="delivery" in action),
                            ["POST"], "Companion V2 " + action))
         # 注册过程本身就用同一份 inventory 组装角色路由，不需要再嵌套一次
@@ -375,6 +381,9 @@ class MultiHostWebAPI:
                     routes.extend(LegacyGroupDataWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
                         role["legacy_group_data_api"]))
                 if role["memory_api"] is None:
+                    view = TargetControllerView(self.controller, target["target_id"], role["role_id"])
+                    routes.extend(configuration_routes(role["reply_api"], view,
+                        allowed_sections=GROUP_CONFIGURATION_SECTIONS))
                     continue
                 source_target_id = getattr(self.controller, "role_source_target_id",
                     lambda _role_id, fallback: fallback)(role["role_id"], target["target_id"])

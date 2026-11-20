@@ -73,6 +73,19 @@ function createDom({omitStatic = []} = {}) {
       addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
       setAttribute() {}, removeAttribute() {}, getAttribute: () => null, hasAttribute: () => false,
       appendChild() {}, removeChild() {}, insertBefore() {}, replaceChildren() {},
+      insertAdjacentHTML(position, value) {
+        assert.ok(["afterbegin", "beforeend"].includes(position));
+        const html = String(value);
+        element._html = position === "afterbegin" ? html + element._html : element._html + html;
+        for (const match of html.matchAll(/\bid="([^"]+)"/g)) {
+          const childId = match[1];
+          const fresh = makeElement(childId);
+          fresh._html = innerHtmlOf(html, childId) ?? "";
+          fresh._descendants = new Set([...fresh._html.matchAll(/\bid="([^"]+)"/g)].map(item => item[1]));
+          nodes.set(childId, fresh);
+          element._descendants.add(childId);
+        }
+      },
       querySelector: () => null, querySelectorAll: () => [], closest: () => null, contains: () => false,
       focus() {}, blur() {}, click() {}, remove() {}, scrollIntoView() {},
       replaceWith(next) {
@@ -133,6 +146,26 @@ function createDom({omitStatic = []} = {}) {
   };
   return {document};
 }
+
+test("插入范围提示保留已有编辑器节点，整体重画仍使旧节点失效", () => {
+  const {document} = createDom();
+  const host = document.getElementById("shellPanel");
+  host.innerHTML = '<div id="editor"><input id="draft"></div>';
+  const editor = document.getElementById("editor");
+  const draft = document.getElementById("draft");
+  draft.value = "未保存内容";
+  host.insertAdjacentHTML("afterbegin", '<section id="scope">会话</section>');
+  host.insertAdjacentHTML("beforeend", '<div id="footer">说明</div>');
+  assert.equal(document.getElementById("editor"), editor);
+  assert.equal(document.getElementById("draft"), draft);
+  assert.equal(draft.value, "未保存内容");
+  assert.equal(document.getElementById("scope").innerHTML, "会话");
+  assert.equal(document.getElementById("footer").innerHTML, "说明");
+  host.innerHTML = "";
+  assert.equal(editor.isConnected, false);
+  assert.equal(document.getElementById("scope"), null);
+  assert.equal(document.getElementById("footer"), null);
+});
 
 const ROLE = {
   role_id: "role-first", role_name: "小伴",
@@ -240,7 +273,7 @@ function harness({configEditorsCreatable = true} = {}) {
     queueMicrotask, structuredClone,
     requestAnimationFrame: window.requestAnimationFrame, cancelAnimationFrame() {},
     matchMedia: window.matchMedia, getComputedStyle: window.getComputedStyle,
-    Intl, URL, URLSearchParams, TextEncoder, TextDecoder,
+    Intl, URL, URLSearchParams, TextEncoder, TextDecoder, crypto: require("node:crypto").webcrypto,
   });
   let loadFailure = null;
   try { vm.runInContext(APP, context, {filename: "app.js"}); }
@@ -280,6 +313,29 @@ async function enterActionPage(page, {warm = false} = {}) {
     await page.settle();
   }
 }
+
+test("每日次数关闭时概览显示无限，旧设置仍显示原上限", () => {
+  const page = loadPage();
+  assert.match(page.run("qzoneLimitsMarkup({publish_max_daily:1})"), /每日最多说说 1 条/);
+  assert.match(page.run("qzoneLimitsMarkup({daily_limits_enabled:true,publish_max_daily:2})"), /每日最多说说 2 条/);
+  const unlimited = page.run("qzoneLimitsMarkup({daily_limits_enabled:false,publish_max_daily:1,action_min_interval_minutes:30})");
+  assert.match(unlimited, /每日说说次数 无限/);
+  assert.match(unlimited, /同类动作最短间隔 30 分钟/);
+  assert.doesNotMatch(unlimited, /每日最多说说/);
+  assert.match(page.run("qzoneLimitsMarkup({daily_limits_enabled:false})"), /每日说说次数 无限/);
+});
+
+test("已安装但尚未授权时显示授权入口，并阻止读取和发布动作", async () => {
+  const page = loadPage();
+  await enterActionPage(page);
+
+  const body = page.document.getElementById("actionQzoneBody").innerHTML;
+  assert.match(body, /data-qzone-action="authorize"/);
+  assert.match(body, /授权四项能力/);
+  assert.equal(page.run("qzoneGate('feed').ok"), false);
+  assert.equal(page.run("qzoneGate('publish').ok"), false);
+  assert.match(page.run("qzoneGate('feed').reason"), /尚未授权/);
+});
 
 function assertSingleEditorOnCurrentHost(page) {
   const host = page.host();
@@ -481,4 +537,89 @@ test("刷新后仍是 unknown：提示语不冒充「已刷新」", async () => 
   assert.equal(notice.error, true);
   assert.match(notice.text, /还没有被读取/);
   assert.doesNotMatch(notice.text, /凭据已刷新/);
+});
+
+for (const wrapped of [true, false]) {
+  for (const outcome of ["done", "accepted", "unknown"]) {
+    test(`发布回执 ${outcome}（${wrapped ? "receipt 包装" : "旧版直接返回"}）决定提示与草稿保留`, async () => {
+      const page = loadPage();
+      page.status.catalogue = {topics: [{id: "casual", label: "随笔", scenes: ["conversation"]}], scenes: {}};
+      await enterActionPage(page);
+      page.run("qzoneState.publishDraft = '测试正文'");
+      const calls = [];
+      page.product.request = async (method, route) => {
+        calls.push({method, route});
+        const receipt = {status: outcome, verified: outcome === "done", operation_id: "test-publish"};
+        return method === "POST" ? (wrapped ? {candidate_id: "", source_refs: [], receipt} : receipt) : page.status;
+      };
+
+      await page.run("qzonePublish()");
+
+      assert.equal(calls.filter(call => call.method === "POST").length, 1);
+      assert.equal(page.run("qzoneState.publishDraft"), outcome === "unknown" ? "测试正文" : "");
+      assert.equal(page.run("qzoneState.notice.text"), {done: "已发布", accepted: "待同步", unknown: "结果未知"}[outcome]);
+      assert.equal(calls.filter(call => call.method === "GET").length, outcome === "unknown" ? 0 : 1);
+    });
+  }
+}
+
+test("本人动态回读评论详情并渲染返回评论，不发送公开动作", async () => {
+  const page=loadPage();
+  await enterActionPage(page);
+  const calls=[];
+  page.product.request=async(method,route,body)=>{
+    calls.push({method,route,body});
+    return {scope:'own',items:[{post_ref:'post',author:'我',excerpt:'测试动态',comments:[{author:'我',text:'测试评论'}]}]};
+  };
+  await page.run("qzoneScan('own')");
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].method,'GET');
+  assert.equal(calls[0].body.detail,1);
+  assert.match(page.run("qzonePostMarkup(qzoneState.feeds.own.items[0],0)"),/测试评论/);
+});
+
+test("带图发布保留选择顺序，纯图片可提交，结果未知不会丢草稿或自动重发", async () => {
+  const page=loadPage();
+  page.status.invoke_granted=true;
+  page.status.consented={'qzone.post.publish':true};
+  page.status.catalogue={topics:[{id:'casual',label:'随笔',scenes:['conversation']}],scenes:{}};
+  await enterActionPage(page);
+  page.run("qzoneState.publishImages=[{image_id:'generated-image:one:0',thumbnail:'data:image/png;base64,AA=='},{data_url:'data:image/png;base64,BB==',name:'test.png'}]");
+  assert.doesNotMatch(page.run("qzonePublishBlockMarkup({ok:true})").match(/<button[^>]*data-qzone-action="publish"[^>]*>/)[0],/disabled/);
+  const calls=[];
+  page.product.request=async(method,route,body,options)=>{
+    calls.push({method,route,body,options});
+    if(method==='POST')throw Object.assign(new Error('timeout'),{code:'bridge_timeout'});
+    return page.status;
+  };
+  await page.run('qzonePublish()');
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].options.timeoutMs,300000);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body.images)),[
+    {image_id:'generated-image:one:0'},{data_url:'data:image/png;base64,BB==',name:'test.png'}]);
+  assert.equal(page.run('qzoneState.publishImages.length'),2);
+  assert.equal(page.run('qzoneState.notice.error'),true);
+});
+
+test("选择本地图片只预览，移除和切换角色会清掉图片，动态渲染拒绝脚本URL", async () => {
+  const page=loadPage();
+  await enterActionPage(page);
+  page.context.FileReader=class {
+    readAsDataURL(){this.result='data:image/png;base64,AA==';this.onload();}
+  };
+  const before=page.requests.length;
+  await page.run("qzoneChooseImages([{type:'image/png',name:'test.png',size:100}])");
+  assert.equal(page.requests.length,before,'选图不能触发上传');
+  assert.equal(page.run('qzoneState.publishImages.length'),1);
+  assert.match(page.run('qzoneImagePickerMarkup()'),/移除第 1 张图片/);
+  page.run("qzoneClick({dataset:{qzoneAction:'image-remove',qzoneImage:'0'}})");
+  assert.equal(page.run('qzoneState.publishImages.length'),0);
+  await page.run("qzoneChooseImages([{type:'image/png',name:'test.png',size:100}])");
+  page.product.role=()=>({...ROLE,qzone_extension_api:'/astrbot_plugin_private_companion/targets/other/qzone-extension'});
+  page.run('qzoneImageScope()');
+  assert.equal(page.run('qzoneState.publishImages.length'),0);
+  const markup=page.run("qzonePhotosMarkup([{url:'javascript:alert(1)'},{url:'https://photo.store.qq.com/a/photo'}])");
+  assert.doesNotMatch(markup,/javascript:/);
+  assert.match(markup,/referrerpolicy="no-referrer"/);
+  assert.match(markup,/动态配图 2/);
 });

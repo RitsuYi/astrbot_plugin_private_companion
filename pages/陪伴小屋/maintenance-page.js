@@ -35,7 +35,7 @@ window.CompanionMaintenancePage = (() => {
   const taskName = value => ({
     "conversation.reply": "对话回复", "proactive.plan": "主动联系规划", "proactive.compose": "主动联系写作",
     "conversation.astrbot_core": "AstrBot 核心对话",
-    "proactive.judge": "主动联系复核", "memory.reflect": "记忆整理",
+    "proactive.judge": "主动联系复核", "memory.reflect": "事实整理",
     "role.state.maintain": "角色状态", "calendar.plan": "日程规划",
     "role.reading.consume": "阅读理解", "role.growth.progress": "成长进展",
     "role.journal.diary": "日记", "role.journal.dream": "梦境",
@@ -46,7 +46,7 @@ window.CompanionMaintenancePage = (() => {
     "conversation.image_narration": "当前图片转述", "conversation.video_narration": "原生视频转述",
     "conversation.image_review": "图片审核", "image_review": "图片审核", "screen.interpretation": "屏幕理解",
     "screen.peek": "屏幕速览", "role.state.maintenance": "状态维护",
-    "role.calendar.plan": "日历规划", "memory.reflection": "记忆反思",
+    "role.calendar.plan": "日历规划", "memory.reflection": "整理与反思",
     "conversation.group.review": "群聊审核",
     "reality_touch_camera": "摄像头视觉分析",
     "reality_touch": "现实陪伴文案", "wakeup_alarm_message": "起床提醒文案",
@@ -58,7 +58,7 @@ window.CompanionMaintenancePage = (() => {
     ["对话", [["conversation.reply", "对话回复", "AstrBot 核心回复的 V2 附加提示"],
       ["conversation.image_narration", "当前图片转述", "为本轮已授权图片生成简短文字描述"],
       ["conversation.video_narration", "原生视频转述", "将原视频交给支持视频输入的模型直接理解"]]],
-    ["主动与记忆", [["proactive.plan", "主动联系规划", "双阶段模式下判断时机与切口"], ["proactive.compose", "主动联系写作", "生成主动联系正文"], ["proactive.judge", "主动联系复核", "复核是否符合当前人格与来源"], ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
+    ["主动与整理", [["proactive.plan", "主动联系规划", "双阶段模式下判断时机与切口"], ["proactive.compose", "主动联系写作", "生成主动联系正文"], ["proactive.judge", "主动联系复核", "复核是否符合当前人格与来源"], ["memory.reflect", "事实整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"], ["role.self_review", "自我复盘", "回看已完成的角色生活记录"], ["role.expression.learn", "表达学习", "从已授权表达样本提炼风格"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
     ["视觉与媒体", [["conversation.context_image_caption", "图片摘要", "从已授权图片提取可见事实"], ["image_review", "图片审核", "按合同检查图片内容"], ["conversation.image_review", "图片审核", "按合同检查图片内容"], ["screen.interpretation", "屏幕理解", "理解已授权屏幕画面"], ["screen.peek", "屏幕速览", "对已授权屏幕进行短摘要"]]],
@@ -475,15 +475,15 @@ window.CompanionMaintenancePage = (() => {
     if (linkage.state === "ready") {
       const categories = Array.isArray(linkage.categories) ? linkage.categories : [];
       const labels = {profile: "个人资料", preference: "偏好", relationship: "关系", private_conversation: "私聊内容", other: "其他"};
-      return '<section class="maint-memory-linkage" aria-label="V2 记忆联动计数"><div><strong>V2 联动摘要</strong><span>' +
-        escapeHtml(linkage.display_name || "记忆插件") + ' · 只读分类计数，不含记忆正文</span></div><dl>' +
+      return '<section class="maint-memory-linkage" aria-label="本插件联动计数"><div><strong>本插件联动摘要</strong><span>' +
+        escapeHtml(linkage.display_name || "外部记忆插件") + ' · 只读分类计数</span></div><dl>' +
         categories.map(item => '<div><dt>' + escapeHtml(labels[item.key] || "其他") + '</dt><dd>' + number(item.count) + '</dd></div>').join("") +
         '<div><dt>合计</dt><dd>' + number(linkage.counts?.total) + '</dd></div></dl></section>';
     }
     if (linkage.state === "not_owner") {
-      return '<section class="maint-memory-linkage is-muted"><div><strong>V2 联动摘要</strong><span>当前长期记忆由 V2 提供，外部摘要未读取。</span></div></section>';
+      return '<section class="maint-memory-linkage is-muted"><div><strong>本插件联动摘要</strong><span>当前由本插件提供。</span></div></section>';
     }
-    return '<section class="maint-memory-linkage is-muted"><div><strong>V2 联动摘要暂不可用</strong><span>外部 Token 账本与 V2 角色预算仍分别统计。</span></div></section>';
+    return '<section class="maint-memory-linkage is-muted"><div><strong>本插件联动摘要暂不可用</strong><span>外部账本与本插件预算分别统计。</span></div></section>';
   }
 
   function externalTokenMarkup(sourceKey) {
@@ -582,7 +582,17 @@ window.CompanionMaintenancePage = (() => {
     const product = window.CompanionProduct;
     const bridge = product?.bridgeNow?.() || await product?.bridgeFor?.();
     if (!bridge) throw new Error("页面桥尚未就绪，请重新读取。");
-    const response = method === "GET" ? await bridge.apiGet(path) : await bridge.apiPost(path, body || {});
+    /* The Dashboard bridge owns the plugin prefix and rejects `?` inside the
+       endpoint.  Split query fields out and pass them through the bridge's
+       query argument instead. */
+    const [rawRoute, rawQuery = ""] = String(path || "").split("?", 2);
+    const route = rawRoute.replace(/^\/+/, "");
+    if (!route) throw new Error("当前页面没有可用的插件接口。");
+    const query = {};
+    for (const [key, value] of new URLSearchParams(rawQuery)) query[key] = value;
+    const response = method === "GET"
+      ? await bridge.apiGet(route, Object.keys(query).length ? query : undefined)
+      : await bridge.apiPost(route, body || {});
     let value = response;
     for (let depth = 0; depth < 3; depth += 1) {
       if (value?.status === "error") {
@@ -837,11 +847,11 @@ window.CompanionMaintenancePage = (() => {
     const variables = task.sectionVariables.length ? '<div class="maint-prompt-variables">' + task.sectionVariables.map(name =>
       '<code>{' + escapeHtml(name) + '}</code><span>' + (name === "chars" ? "当前强度档位的总字数，请保留该变量" : "运行时注入") + '</span>').join("") + '</div>' : "";
     return header + tabs + panel(selector +
-      '<div class="maint-prompt-provenance" aria-label="提示词继承来源"><span><small>当前窗口</small><strong>' + escapeHtml(PROMPT_SOURCE_NAMES[source] || source) + '</strong></span><i data-lucide="arrow-right"></i><span><small>继承自</small><strong>' + escapeHtml(PROMPT_SOURCE_NAMES[inheritedSource] || inheritedSource) + '</strong></span></div>' +
+      '<div class="maint-prompt-provenance" aria-label="提示词继承来源"><span><small>当前来源</small><strong>' + escapeHtml(PROMPT_SOURCE_NAMES[source] || source) + '</strong></span><i data-lucide="arrow-right"></i><span><small>继承自</small><strong>' + escapeHtml(PROMPT_SOURCE_NAMES[inheritedSource] || inheritedSource) + '</strong></span></div>' +
       '<label class="maint-prompt-field"><span><strong>' + escapeHtml(task.sectionLabel) + '</strong><small>最多 ' + PROMPT_LIMIT + ' 字</small></span><textarea data-prompt-draft rows="16" maxlength="' + PROMPT_LIMIT + '" spellcheck="false"' + (state.promptSaving || state.promptReloading ? ' disabled' : '') + ' placeholder="留空后保存将恢复继承值。">' + escapeHtml(state.promptDraft) + '</textarea></label>' + variables +
       '<div class="maint-prompt-editor-foot"><span class="maint-prompt-status" data-state="' + escapeHtml(messageKind) + '" role="status" aria-live="polite"><span>' + escapeHtml(message) + '</span><b>' + number(state.promptDraft.length) + ' / ' + PROMPT_LIMIT + ' 字</b></span><div class="maint-prompt-actions">' +
       (state.promptStale ? '<button type="button" class="maint-prompt-secondary" data-prompt-discard ' + (state.promptReloading ? 'disabled' : '') + '><i data-lucide="rotate-ccw"></i><span>' + (state.promptReloading ? "正在读取最新配置" : "以最新配置重载") + '</span></button>' : '') +
-      '<button type="button" class="maint-prompt-secondary" data-prompt-reset title="' + (task.sectionKey === "task_prompt" ? "恢复角色级继承值" : "恢复上级继承值") + '" ' + (canReset ? '' : 'disabled') + '><i data-lucide="rotate-ccw"></i><span>恢复继承值</span></button><button type="button" class="maint-prompt-primary" data-prompt-save ' + (canSave ? '' : 'disabled') + '><i data-lucide="save"></i><span>' + (state.promptSaving ? "正在保存" : "保存提示词") + '</span></button></div></div>' +
+      '<button type="button" class="maint-prompt-secondary" data-prompt-reset title="' + "恢复上级继承值" + '" ' + (canReset ? '' : 'disabled') + '><i data-lucide="rotate-ccw"></i><span>恢复继承值</span></button><button type="button" class="maint-prompt-primary" data-prompt-save ' + (canSave ? '' : 'disabled') + '><i data-lucide="save"></i><span>' + (state.promptSaving ? "正在保存" : "保存提示词") + '</span></button></div></div>' +
       metadata +
       '<details class="maint-prompt-default"><summary>查看内置默认模板</summary><section class="maint-prompt-preview" aria-label="模型任务内置默认提示"><div class="maint-prompt-subhead"><strong>模型任务内置默认提示</strong><span>V2 运行端 · v' + escapeHtml(task.promptVersion) + '</span></div><pre>' + escapeHtml(task.builtinPromptAvailable ? task.builtinPrompt || "（内置任务提示为空）" : "（内置提示未返回）") + '</pre></section></details>' +
       (task.sectionKey === "task_prompt" ? dynamicFields + '<details class="maint-prompt-default"><summary>运行时提示组成</summary>' + promptCompositionMarkup(selectedTask) + '</details>' : ""));
@@ -855,7 +865,7 @@ window.CompanionMaintenancePage = (() => {
     const empty = !state.modelStatus ? "正在读取模型任务目录……" : !tasks.length ? "当前没有可管理的 V2 模型任务。" : !visible.length ? "当前筛选下没有匹配的任务。" : "";
     const customizedCount = tasks.filter(task => task.customized).length;
     const taskRows = visible.map(task => '<button type="button" class="maint-prompt-task' + (task.kind === state.promptSelectedKind ? ' is-active' : '') + '" data-prompt-task="' + escapeHtml(task.kind) + '" aria-pressed="' + (task.kind === state.promptSelectedKind) + '" title="' + escapeHtml(task.description) + '" ' + (state.promptSaving ? 'disabled' : '') + '><span class="maint-prompt-task-copy"><strong>' + escapeHtml(task.label) + '</strong><small>' + escapeHtml(task.description) + '</small><code>' + escapeHtml(task.kind) + '</code></span><span class="maint-prompt-task-state" data-state="' + (task.customized ? 'custom' : 'default') + '"><i aria-hidden="true"></i><small>' + (task.customized ? '已自定义' : '默认') + '</small></span></button>').join("");
-    return '<section class="maint-prompt-section" aria-labelledby="maint-prompt-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">运行配置</span><h3 id="maint-prompt-heading">任务提示词</h3><p class="maint-scope-note"><i data-lucide="shield-check"></i>当前窗口</p></div><div class="maint-prompt-summary"><span><strong>' + tasks.length + '</strong> 个任务</span><span><strong>' + customizedCount + '</strong> 个已自定义</span><button type="button" class="maint-text-action" data-maint-nav="system-prompts">系统提示词</button></div></div><div class="maint-prompt-workspace"><aside class="maint-prompt-catalog" aria-label="任务提示词目录"><div class="maint-prompt-catalog-tools"><label><i data-lucide="search"></i><span class="sr-only">搜索任务</span><input type="search" data-prompt-search value="' + escapeHtml(state.promptQuery) + '" placeholder="搜索任务或提示内容" ' + (state.promptSaving ? 'disabled' : '') + '></label><div class="maint-prompt-mode" role="group" aria-label="提示词状态筛选"><button type="button" data-prompt-mode="all" aria-pressed="' + (state.promptMode === 'all') + '" class="' + (state.promptMode === 'all' ? 'is-active' : '') + '" ' + (state.promptSaving ? 'disabled' : '') + '>全部</button><button type="button" data-prompt-mode="customized" aria-pressed="' + (state.promptMode === 'customized') + '" class="' + (state.promptMode === 'customized' ? 'is-active' : '') + '" ' + (state.promptSaving ? 'disabled' : '') + '>已自定义</button></div></div><nav class="maint-prompt-groups" aria-label="任务分组">' + promptGroupMarkup(tasks) + '</nav><div class="maint-prompt-task-list">' + (empty ? '<div class="maint-prompt-list-state">' + escapeHtml(empty) + '</div>' : taskRows) + '</div></aside><section class="maint-prompt-editor" aria-label="提示词编辑器">' + promptEditorMarkup(selected) + '</section></div></section>';
+    return '<section class="maint-prompt-section" aria-labelledby="maint-prompt-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">运行配置</span><h3 id="maint-prompt-heading">任务提示词</h3><p class="maint-scope-note"><i data-lucide="shield-check"></i>角色默认</p></div><div class="maint-prompt-summary"><span><strong>' + tasks.length + '</strong> 个任务</span><span><strong>' + customizedCount + '</strong> 个已自定义</span><button type="button" class="maint-text-action" data-maint-nav="system-prompts">系统提示词</button></div></div><div class="maint-prompt-workspace"><aside class="maint-prompt-catalog" aria-label="任务提示词目录"><div class="maint-prompt-catalog-tools"><label><i data-lucide="search"></i><span class="sr-only">搜索任务</span><input type="search" data-prompt-search value="' + escapeHtml(state.promptQuery) + '" placeholder="搜索任务或提示内容" ' + (state.promptSaving ? 'disabled' : '') + '></label><div class="maint-prompt-mode" role="group" aria-label="提示词状态筛选"><button type="button" data-prompt-mode="all" aria-pressed="' + (state.promptMode === 'all') + '" class="' + (state.promptMode === 'all' ? 'is-active' : '') + '" ' + (state.promptSaving ? 'disabled' : '') + '>全部</button><button type="button" data-prompt-mode="customized" aria-pressed="' + (state.promptMode === 'customized') + '" class="' + (state.promptMode === 'customized' ? 'is-active' : '') + '" ' + (state.promptSaving ? 'disabled' : '') + '>已自定义</button></div></div><nav class="maint-prompt-groups" aria-label="任务分组">' + promptGroupMarkup(tasks) + '</nav><div class="maint-prompt-task-list">' + (empty ? '<div class="maint-prompt-list-state">' + escapeHtml(empty) + '</div>' : taskRows) + '</div></aside><section class="maint-prompt-editor" aria-label="提示词编辑器">' + promptEditorMarkup(selected) + '</section></div></section>';
   }
 
   const SYSTEM_PROMPT_ENTRIES = [
@@ -882,7 +892,8 @@ window.CompanionMaintenancePage = (() => {
       risk: "改错可能让模型把摘要当证据、把旧记忆套到别人，或反复背诵时间戳。"},
   ];
   const SYSTEM_PROMPT_LIMIT = 8000;
-  const CONFIG_PREFIX = "/astrbot_plugin_private_companion/config";
+  const PLUGIN_PREFIX = "/astrbot_plugin_private_companion";
+  const CONFIG_PREFIX = PLUGIN_PREFIX + "/config";
   const SYSTEM_PROMPT_OPERATION = "maintenance-system-prompt";
 
   function systemPromptEntry(key) {
@@ -890,9 +901,20 @@ window.CompanionMaintenancePage = (() => {
   }
 
   function configEndpoint() {
-    const endpoint = window.CompanionProduct?.role?.()?.config_api;
-    if (typeof endpoint !== "string" || !endpoint.startsWith(CONFIG_PREFIX)
-        || /[?#%\\:]/.test(endpoint)
+    const role = window.CompanionProduct?.role?.();
+    /* Older inventories exposed only config_api, and a group-only role used to
+       have none. role_config_api is the role-owned fallback for exactly that
+       case; prefer the target-scoped route when both exist. */
+    const endpoint = role?.config_api || role?.role_config_api;
+    /* Single-host exposes the installation route `/config`; a multi-host role
+       exposes `/targets/<id>/roles/<hash>/config`. Both end in `/config`, so do
+       not require the single-host prefix literally. */
+    if (typeof endpoint !== "string"
+        || !(endpoint === CONFIG_PREFIX
+             || endpoint.startsWith(PLUGIN_PREFIX + "/host/targets/")
+             || endpoint.startsWith(PLUGIN_PREFIX + "/targets/"))
+        || !endpoint.endsWith("/config")
+        || /[?#%\\:\s]/.test(endpoint)
         || endpoint.split("/").slice(1).some(part => !part || part === "." || part === "..")) {
       throw new Error("当前对象没有配置管理接口。请先选择已初始化的会话角色。");
     }
@@ -905,13 +927,16 @@ window.CompanionMaintenancePage = (() => {
 
   async function configRequest(method, suffix = "", body = null, query = null) {
     const product = window.CompanionProduct;
-    if (typeof product?.request === "function") {
-      const endpoint = configEndpoint();
-      return method === "GET"
-        ? product.request("GET", endpoint, query || undefined)
-        : product.request("POST", endpoint + suffix, body || {});
-    }
+    /* CompanionProduct.request uses the same plugin-relative endpoint contract
+       as the bridge.  configEndpoint() is the absolute catalog value, so it
+       must be shortened before it reaches product.request; otherwise the host
+       receives the plugin name twice and rejects it. */
     const path = configPath();
+    if (typeof product?.request === "function") {
+      return method === "GET"
+        ? product.request("GET", path, query || undefined)
+        : product.request("POST", path + suffix, body || {});
+    }
     if (method === "GET") {
       const queryText = Object.entries(query || {})
         .map(([key, value]) => encodeURIComponent(key) + "=" + encodeURIComponent(String(value)))
@@ -2121,7 +2146,7 @@ window.CompanionMaintenancePage = (() => {
       ],
       budget: [
         ["软限额会中断正在运行的任务吗？", "不会。软限额只影响达到阈值后新建的可选后台任务；已运行任务继续完成。", "budget-block", "查看限额"],
-        ["Provider 余额等于本地预算吗？", "不等于。本页只显示 V2 本地角色预算，当前没有统一授权的 Provider 余额接口。", "budget-block", "查看本地预算"],
+        ["Provider 余额等于本地预算吗？", "不等于。本页只显示 本插件角色预算，当前没有统一授权的 Provider 余额接口。", "budget-block", "查看本地预算"],
       ],
       cache: [
         ["低命中能证明缓存被破坏吗？", "不能。低命中和结构签名只提供排查线索，命中变化也不证明某个请求字段导致缓存失效。", "cache-panel", "查看缓存样本"],
@@ -2989,9 +3014,9 @@ window.CompanionMaintenancePage = (() => {
     const value = balance.available
       ? balance.amount == null || String(balance.amount).trim() === "" ? "未提供余额" : balanceAmount(balance.amount) + " " + (balance.currency_label || "额度")
       : status;
-    const detail = !state.balanceLoaded ? "读取已配置的模型服务余额；查询结果与 V2 本地角色预算分开显示。"
+    const detail = !state.balanceLoaded ? "读取已配置的模型服务余额；查询结果与 本插件角色预算分开显示。"
       : !balance.configured ? "未配置余额端点；NewAPI 需要单独的用户访问令牌。"
-      : balance.available ? "查询于 " + time(balance.observed_at) + "；不会并入 V2 本地角色预算。"
+      : balance.available ? "查询于 " + time(balance.observed_at) + "；不会并入 本插件角色预算。"
       : balance.state === "configuration_invalid" ? "余额查询配置无效，请检查余额查询配置。"
       : "查询失败，请检查 HTTPS 地址、访问令牌与额度单位配置。";
     return '<div class="maint-balance-availability" data-state="' + (balance.available ? "ok" : balance.configured ? "warn" : "unknown") + '">' +
@@ -3474,6 +3499,55 @@ window.CompanionMaintenancePage = (() => {
       (recentMarkup || emptyMarkup) + '</section></div>';
   }
 
+  function logsMarkup() {
+    const records = Array.isArray(state.logs) ? state.logs : [];
+    const levels = [["", "全部级别"], ["DEBUG", "DEBUG"], ["INFO", "INFO"], ["WARNING", "WARNING"], ["ERROR", "ERROR"]];
+    const controls = '<div class="maint-log-controls">' +
+      '<select data-log-level aria-label="筛选日志级别">' + levels.map(([value, label]) =>
+        '<option value="' + value + '"' + (state.logLevel === value ? " selected" : "") + '>' + label + '</option>').join("") + '</select>' +
+      '<input type="search" data-log-query aria-label="搜索日志" placeholder="搜索消息或 logger" value="' + escapeHtml(state.logQuery) + '">' +
+      '<button type="button" class="maint-text-action" data-log-search>搜索</button>' +
+      '<button type="button" class="maint-refresh" data-log-refresh ' + (state.logsLoading ? "disabled" : "") + '><i data-lucide="refresh-cw"></i><span>' + (state.logsLoading ? "读取中" : "刷新") + '</span></button></div>';
+    const body = state.logsError ? '<div class="maint-error" role="alert"><i data-lucide="cloud-off"></i><div><strong>日志暂不可用</strong><p>' + escapeHtml(state.logsError) + '</p></div></div>'
+      : !records.length ? '<div class="maint-log-empty">当前筛选下没有日志。插件运行后再刷新即可看到最近记录。</div>'
+        : '<div class="maint-log-list" role="log">' + records.map(row =>
+          '<div class="maint-log-row" data-level="' + escapeHtml(row.level || "INFO") + '">' +
+          '<span class="maint-log-time">' + escapeHtml(time(row.at)) + '</span>' +
+          '<span class="maint-log-level">' + escapeHtml(row.level || "INFO") + '</span>' +
+          '<code class="maint-log-logger">' + escapeHtml(row.logger || "") + '</code>' +
+          '<span class="maint-log-message">' + escapeHtml(row.message || "") + '</span></div>').join("") + '</div>';
+    return '<section class="maint-log-panel" aria-labelledby="maint-log-heading">' +
+      '<div class="maint-panel-heading"><div><span class="maint-eyebrow">追踪 / 04</span><h3 id="maint-log-heading">最近日志</h3>' +
+      '<p class="maint-scope-note"><i data-lucide="shield-check"></i>仅当前插件进程的内存缓冲，最多 2000 条，不读取 AstrBot 全局日志文件。</p></div></div>' +
+      controls + body + '<p class="maint-log-foot">显示 ' + number(records.length) + ' 条 · 日志只在本次插件进程中保留，重启后清空。</p></section>';
+  }
+
+  async function loadLogs() {
+    if (!state || state.logsLoading) return;
+    const current = state, ticket = generation;
+    current.logsLoading = true;
+    current.logsError = "";
+    render();
+    try {
+      const params = new URLSearchParams({limit: "300"});
+      if (current.logLevel) params.set("level", current.logLevel);
+      if (current.logQuery.trim()) params.set("q", current.logQuery.trim());
+      const data = await api("GET", "/logs?" + params.toString());
+      if (ticket !== generation || state !== current) return;
+      current.logs = Array.isArray(data?.records) ? data.records : [];
+      current.logsLoaded = true;
+    } catch (error) {
+      if (ticket !== generation || state !== current) return;
+      current.logs = [];
+      current.logsError = error?.message || "无法读取日志。";
+    } finally {
+      if (ticket === generation && state === current) {
+        current.logsLoading = false;
+        render();
+      }
+    }
+  }
+
   function render() {
     if (!root || !state) return;
     const samples = root.querySelectorAll?.("details[data-reply-sample]");
@@ -3528,13 +3602,15 @@ window.CompanionMaintenancePage = (() => {
     const navItems = [
       ["overview", "Token 统计"], ["diagnostics", "排障"], ["cache", "缓存诊断"],
       ["efficiency", "回复效率"], ["recent", "最近调用"], ["prompts", "任务提示词"], ["system-prompts", "系统提示词"],
+      ["logs", "日志"],
     ];
     const navMarkup = '<nav class="maint-subnav" aria-label="治理与维护二级导航">' + navItems.map(item =>
       '<button type="button" data-maint-nav="' + item[0] + '" aria-current="' + (state.activeMaintenanceNav === item[0] ? "page" : "false") + '">' + item[1] + '</button>').join("") + '</nav>';
     const boardTitles = {overview: "Token 管理", diagnostics: "运行排障", cache: "缓存诊断", efficiency: "近期回复效率",
-      recent: "最近调用", prompts: "任务提示词", "system-prompts": "系统提示词"};
+      recent: "最近调用", prompts: "任务提示词", "system-prompts": "系统提示词", logs: "最近日志"};
     const boardDescriptions = {efficiency: "近 7 日 · 核心发送耗时与历史投递耗时",
-      "system-prompts": "核心回复固定规则 · 修改前请阅读风险说明"};
+      "system-prompts": "核心回复固定规则 · 修改前请阅读风险说明",
+      logs: "当前插件进程的最近日志 · 排障时可搜索、按级别筛选"};
     const boardTitle = boardTitles[state.activeMaintenanceNav] || "运行态势";
     root.innerHTML = '<div class="maint-board"><header class="maint-board-head"><div class="maint-board-copy"><span class="maint-eyebrow">陪伴 / 信号室</span><h2>' + boardTitle + '</h2><p>' +
       (boardDescriptions[state.activeMaintenanceNav] || "运行态势 · 当前角色用量、预算与调用构成。") + '</p></div>' +
@@ -3558,7 +3634,9 @@ window.CompanionMaintenancePage = (() => {
       (state.traceFilter ? '<button type="button" class="maint-text-action" data-clear-trace>清除排行筛选</button>' : "") + '<button type="button" class="maint-text-action" data-toggle-calls>' + (state.showAllCalls ? "收起" : "查看更多") +
       '</button></div></div>' + (state.traceFilter ? '<div class="maint-trace-filter-note">已按排行筛选：' + escapeHtml(state.traceFilter.kind === "tasks" ? taskName(state.traceFilter.key) : state.traceFilter.key) + '</div>' : "") +
       (state.selectedHour ? '<div class="maint-trace-filter-note">已聚焦时段：' + escapeHtml(state.selectedHour.replace("T", " ") + ":00") + ' <button type="button" class="maint-text-action" data-clear-hour>清除时段</button></div>' : "") +
-      recentView + '</section></section><footer class="maint-board-footer"><span>当前角色 / ' + escapeHtml(role) + '</span><span>' + escapeHtml(ledgerNote) + '</span></footer></div>';
+      recentView + '</section></section>' +
+      '<section class="maint-view" data-maint-view="logs"' + (state.activeMaintenanceNav === "logs" ? "" : " hidden") + '>' + logsMarkup() + '</section>' +
+      '<footer class="maint-board-footer"><span>当前角色 / ' + escapeHtml(role) + '</span><span>' + escapeHtml(ledgerNote) + '</span></footer></div>';
     if (!state.provider && data.providers?.[0]) state.provider = data.providers[0].id;
     if (!state.voiceProvider && state.integrations?.voice?.providers?.[0]) state.voiceProvider = state.integrations.voice.providers[0].id;
     if (!state.imageAction && state.integrations?.image?.actions?.[0]) state.imageAction = state.integrations.image.actions[0].action;
@@ -3761,7 +3839,7 @@ window.CompanionMaintenancePage = (() => {
     const task = promptEditTarget(promptTasks().find(item => item.kind === updated.kind));
     if (!task) return;
     loadPromptDraft(task);
-    state.promptMessage = reset ? (task.sectionKey === "task_prompt" ? "已恢复角色级继承值。" : "已恢复上级继承值。") : "提示词已保存。";
+    state.promptMessage = reset ? "已恢复上级继承值。" : "提示词已保存。";
     state.promptMessageKind = "ok";
   }
 
@@ -3890,13 +3968,14 @@ window.CompanionMaintenancePage = (() => {
 
   function setMaintenanceView(view) {
     if (!state) return;
-    const views = ["overview", "diagnostics", "cache", "efficiency", "recent", "prompts", "system-prompts"];
+    const views = ["overview", "diagnostics", "cache", "efficiency", "recent", "prompts", "system-prompts", "logs"];
     const next = views.includes(view) ? view : "overview";
     const changed = state.activeMaintenanceNav !== next;
     if (changed && next !== "diagnostics" && state.memoryRunning) {
       stopMemoryDiagnostic("已离开排障页，采样已停止", {render: false});
     }
     state.activeMaintenanceNav = next;
+    if (next === "logs" && !state.logsLoaded && !state.logsLoading) void loadLogs();
     if (changed) state.onViewChange?.(next);
   }
 
@@ -3907,6 +3986,17 @@ window.CompanionMaintenancePage = (() => {
       const requestedView = sectionNav.dataset.maintNav || "overview";
       setMaintenanceView(requestedView);
       render();
+      return;
+    }
+    if (target.closest("[data-log-refresh]") && state) {
+      state.logsLoaded = false;
+      void loadLogs();
+      return;
+    }
+    if (target.closest("[data-log-search]") && state) {
+      state.logQuery = root?.querySelector?.("[data-log-query]")?.value || "";
+      state.logsLoaded = false;
+      void loadLogs();
       return;
     }
     const systemPromptItem = target.closest("[data-system-prompt]");
@@ -4073,6 +4163,12 @@ window.CompanionMaintenancePage = (() => {
   function change(event) {
     const target = event.target;
     if (!state) return;
+    if (target.matches("[data-log-level]")) {
+      state.logLevel = target.value;
+      state.logsLoaded = false;
+      void loadLogs();
+      return;
+    }
     if (target.matches("[data-prompt-section]")) {
       if (state.promptSaving || state.promptReloading) return;
       if (promptDirty()) {
@@ -4104,6 +4200,7 @@ window.CompanionMaintenancePage = (() => {
   function input(event) {
     const target = event.target;
     if (!state) return;
+    if (target.matches("[data-log-query]")) { state.logQuery = target.value || ""; return; }
     if (target.matches("[data-prompt-search]")) {
       const selection = [target.selectionStart, target.selectionEnd];
       state.promptQuery = target.value || "";
@@ -4197,7 +4294,7 @@ window.CompanionMaintenancePage = (() => {
       memorySamples: [], memoryRunning: false, memorySampling: false, memoryComplete: false,
       memoryError: "", memoryStopReason: "", memoryTimer: null, memoryStartedAt: 0,
       tokenSource: "companion", tokenTrendMode: "daily", tokenBreakdown: "providers", tokenDetailView: "daily",
-      activeMaintenanceNav: ["overview", "diagnostics", "cache", "efficiency", "recent", "prompts", "system-prompts"].includes(options.activeView) ? options.activeView : "overview",
+      activeMaintenanceNav: ["overview", "diagnostics", "cache", "efficiency", "recent", "prompts", "system-prompts", "logs"].includes(options.activeView) ? options.activeView : "overview",
       onViewChange: typeof options.onViewChange === "function" ? options.onViewChange : null,
       period: "today", selectedDate: localDay(), selectedHour: "", category: "all", severity: "all", callFilter: "all",
       callQuery: "", traceFilter: null, showAllCalls: false, modelStatus: null, openReplySamples: new Set(),
@@ -4209,7 +4306,8 @@ window.CompanionMaintenancePage = (() => {
       systemPrompts: null, systemPromptsLoading: false, systemPromptsError: "",
       systemPromptKey: "voice_rules", systemPromptDraft: "", systemPromptInitial: "", systemPromptToken: "",
       systemPromptMessage: "", systemPromptMessageKind: "", systemPromptSaving: false,
-      systemPromptOperationKey: "", systemPromptOperationKind: ""};
+      systemPromptOperationKey: "", systemPromptOperationKind: "",
+      logs: null, logsLoaded: false, logsLoading: false, logsError: "", logLevel: "", logQuery: ""};
     const cached = maintenanceCache.get(maintenanceScope);
     if (cached) Object.assign(state, cached);
     state.onViewChange?.(state.activeMaintenanceNav);
@@ -4232,3 +4330,5 @@ window.CompanionMaintenancePage = (() => {
 
   return {mount, unmount};
 })();
+
+

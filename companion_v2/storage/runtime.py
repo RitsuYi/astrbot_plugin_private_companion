@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
+import re
 from pathlib import Path
 import sqlite3
 import sys
@@ -272,17 +273,102 @@ class _SlowOperationLogState:
     max_elapsed_ms: int = 0
 
 
+CONFIGURATION_STORE_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS runtime_metadata (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS operations (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        owner TEXT NOT NULL,
+        installation_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        native_scope_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL DEFAULT '',
+        account_id TEXT NOT NULL DEFAULT '',
+        conversation_id TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        lineage_id TEXT NOT NULL,
+        operation_revision INTEGER NOT NULL CHECK (operation_revision > 0),
+        idempotency_key TEXT NOT NULL,
+        parameter_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'completed', 'unknown')),
+        commit_state TEXT NOT NULL CHECK (commit_state IN ('committed', 'not_committed', 'unknown')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(owner, installation_id, platform, scope_kind, native_scope_id,
+               bot_id, account_id, conversation_id, session_id, idempotency_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS configuration_targets (
+        target_key TEXT PRIMARY KEY NOT NULL,
+        target_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS configuration_values (
+        target_key TEXT NOT NULL,
+        field_id TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        PRIMARY KEY(target_key, field_id),
+        FOREIGN KEY(target_key) REFERENCES configuration_targets(target_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS configuration_changes (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT UNIQUE NOT NULL,
+        target_key TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        changed INTEGER NOT NULL CHECK (changed IN (0, 1)),
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(operation_id) REFERENCES operations(operation_id),
+        FOREIGN KEY(target_key) REFERENCES configuration_targets(target_key)
+    )""",
+    "CREATE INDEX IF NOT EXISTS configuration_changes_target_idx "
+    "ON configuration_changes(target_key, group_id, changed, sequence)",
+    """CREATE TABLE IF NOT EXISTS configuration_consumers (
+        consumer_id TEXT PRIMARY KEY NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        started_sequence INTEGER NOT NULL CHECK (started_sequence >= 0)
+    )""",
+    """CREATE TABLE IF NOT EXISTS configuration_applications (
+        target_key TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        consumer_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        resolution_token TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('applied', 'failed')),
+        adopted_values_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(target_key, group_id, consumer_id),
+        FOREIGN KEY(consumer_id) REFERENCES configuration_consumers(consumer_id)
+    )""",
+)
+
+
+# Newer releases may append defaulted columns without changing semantics.  The
+# data root is allowed to stay at one of these additive versions when an older
+# code package is loaded; rejecting it strands an otherwise readable database.
+FORWARD_COMPATIBLE_SCHEMA_VERSIONS = frozenset({
+    "companion-v2.storage.v69",
+    "companion-v2.storage.v70",
+})
+
+
 class StorageRuntime:
     """Own the V2 database connection; repositories never open their own connection."""
 
     DATABASE_FILENAME = "companion-v2.sqlite3"
-    SLOW_OPERATION_SECONDS = 1.0
+    SLOW_OPERATION_SECONDS = 2.0
+    SLOW_TRANSACTION_BODY_WARNING_SECONDS = 5.0
     # Same window as the two rate-limited diagnostics this repository already
     # trusts: ProactiveScheduler._write_diagnostic(minimum_interval=60) and
     # report_slow_native_lookup (NATIVE_LOOKUP_SLOW_LOG_INTERVAL_SECONDS = 60).
-    # One minute keeps a hot slow query to one line per minute per call site
-    # while still surfacing it inside the tick the operator is already watching.
-    SLOW_OPERATION_LOG_INTERVAL_SECONDS = 60.0
+    # A five-minute window keeps a hot slow query to one line per five minutes
+    # per call site; a transaction body that is merely doing Python work is
+    # logged separately at INFO instead of flooding the WARNING channel.
+    SLOW_OPERATION_LOG_INTERVAL_SECONDS = 300.0
     # Keys are (operation, caller) pairs and callers come from shipped source: a
     # measured 1610 transaction/read_one/read_all/read_snapshot call sites in this
     # tree today. The cap therefore sits above the normal bound so it can only
@@ -321,10 +407,28 @@ class StorageRuntime:
         self._slow_operation_clock = time.monotonic
         self._write_depth = 0
         self._write_owner_thread_id: int | None = None
+        self._configuration_only = False
+        self._configuration_store: StorageRuntime | None = None
+
+    @property
+    def configuration_store(self) -> "StorageRuntime":
+        """The runtime that owns configuration rows (this one unless split)."""
+        return self._configuration_store or self
+
+    def attach_configuration_store(self, store: "StorageRuntime | None") -> None:
+        self._configuration_store = store if store is not self else None
 
     @classmethod
     def open(cls, *, data_root: str | Path, installation_id: str) -> "StorageRuntime":
         runtime = cls(data_root=Path(data_root), installation_id=installation_id)
+        runtime._open_connection()
+        return runtime
+
+    @classmethod
+    def open_configuration(cls, *, data_root: str | Path, installation_id: str) -> "StorageRuntime":
+        """Open the small side store without creating the 100+ table conversation schema."""
+        runtime = cls(data_root=Path(data_root), installation_id=installation_id)
+        runtime._configuration_only = True
         runtime._open_connection()
         return runtime
 
@@ -396,15 +500,34 @@ class StorageRuntime:
         if caller is None:
             caller = sys._getframe(1)
         caller_name = f"{Path(caller.f_code.co_filename).name}:{caller.f_lineno}"
-        # Key choice: (operation, caller). The caller is a file name plus a line
-        # number, so a release that shifts lines starts new keys and lets the old
-        # ones age out; a stale key can only ever absorb its own repeats, never
-        # another call site's, because the (operation, caller) pair is the whole
-        # identity. Keeping the line number is what makes two different queries
-        # in one file rate-limit apart, which a file-only key would merge into a
-        # single stream and lose. The key space is therefore bounded by the
-        # shipped call-site count (1610 today) and capped hard by
-        # SLOW_OPERATION_LOG_MAX_KEYS.
+        # A transaction's total includes the Python body between BEGIN and
+        # COMMIT.  Logging that as "SQLite slow" is misleading: the common
+        # 1-4 s case has lock_wait_ms=0 and commit_ms=1 while body_ms carries
+        # the whole cost.  Separate it from real SQL stalls, keep it at INFO,
+        # and only return to WARNING when the body is genuinely pathological.
+        if operation == "transaction":
+            body_match = re.search(r"body_ms=(\d+)", details)
+            commit_match = re.search(r"commit_ms=(\d+)", details)
+            begin_match = re.search(r"begin_ms=(\d+)", details)
+            body_ms = int(body_match.group(1)) if body_match else 0
+            commit_ms = int(commit_match.group(1)) if commit_match else 0
+            begin_ms = int(begin_match.group(1)) if begin_match else 0
+            lock_wait_ms = round((lock_acquired - started) * 1000)
+            sql_phase_ms = lock_wait_ms + begin_ms + commit_ms
+            if body_ms < self.SLOW_TRANSACTION_BODY_WARNING_SECONDS * 1000 and sql_phase_ms < 250:
+                emit, suppressed, max_elapsed_ms = self._admit_slow_operation_log(
+                    ("transaction_body", caller_name), elapsed_ms,
+                )
+                if not emit:
+                    return
+                suffix = f" body_ms={body_ms} begin_ms={begin_ms} commit_ms={commit_ms}"
+                if suppressed:
+                    suffix += f" suppressed={suppressed} max_elapsed_ms={max_elapsed_ms}"
+                logger.info(
+                    "V2 SQLite transaction body slow elapsed_ms=%d lock_wait_ms=%d caller=%s%s",
+                    elapsed_ms, lock_wait_ms, caller_name, suffix,
+                )
+                return
         emit, suppressed, max_elapsed_ms = self._admit_slow_operation_log(
             (operation, caller_name), elapsed_ms,
         )
@@ -434,6 +557,7 @@ class StorageRuntime:
         )
 
     def close(self) -> None:
+        """Close this runtime and its attached configuration store."""
         started = time.perf_counter()
         with self._reader_condition:
             self._reader_closing = True
@@ -450,10 +574,14 @@ class StorageRuntime:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
+            configuration_store = self._configuration_store
+            self._configuration_store = None
         finally:
             finished = time.perf_counter()
             self._lock.release()
             self._report_slow_operation("close", started, lock_acquired, finished)
+        if configuration_store is not None:
+            configuration_store.close()
 
     def __enter__(self) -> "StorageRuntime":
         return self
@@ -608,6 +736,9 @@ class StorageRuntime:
                     connection.execute("PRAGMA busy_timeout = 5000")
                     connection.execute("PRAGMA wal_autocheckpoint = 0")
                     connection.execute("PRAGMA query_only = ON")
+                    connection.execute("PRAGMA cache_size = -65536")
+                    connection.execute("PRAGMA mmap_size = 268435456")
+                    connection.execute("PRAGMA temp_store = MEMORY")
                 except sqlite3.Error as error:
                     if connection is not None:
                         connection.close()
@@ -699,6 +830,14 @@ class StorageRuntime:
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute("PRAGMA wal_autocheckpoint = 0")
+            # The store is routinely hundreds of MB because generated images
+            # still live in BLOB columns.  SQLite's 2 MB default page cache
+            # makes every lookup re-read those pages; 64 MB plus a read-only
+            # mmap keeps hot metadata and payload pages resident without
+            # changing the on-disk format.
+            connection.execute("PRAGMA cache_size = -65536")
+            connection.execute("PRAGMA mmap_size = 268435456")
+            connection.execute("PRAGMA temp_store = MEMORY")
         except (OSError, sqlite3.Error) as error:
             if connection is not None:
                 connection.close()
@@ -710,7 +849,19 @@ class StorageRuntime:
             # every migration checks references before commit and restores them.
             connection.execute("PRAGMA foreign_keys = OFF")
             try:
-                self._initialize_schema()
+                if self._configuration_only:
+                    for statement in CONFIGURATION_STORE_STATEMENTS:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT OR IGNORE INTO runtime_metadata(key, value) VALUES (?, ?)",
+                        ("installation_id", self._installation_id),
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO runtime_metadata(key, value) VALUES (?, ?)",
+                        ("schema_version", "configuration-store.v1"),
+                    )
+                else:
+                    self._initialize_schema()
             finally:
                 connection.execute("PRAGMA foreign_keys = ON")
         except sqlite3.Error as error:
@@ -1561,12 +1712,14 @@ class StorageRuntime:
                 self._migrate_v67_to_v68(connection)
                 version = SCHEMA_VERSION_V68
                 existing_tables = _existing_tables(connection)
-            if version != SCHEMA_VERSION:
+            forward_compatible = version in FORWARD_COMPATIBLE_SCHEMA_VERSIONS
+            if version != SCHEMA_VERSION and not forward_compatible:
                 raise StorageOpenError("V2 data root has an incompatible schema version")
             missing = V68_REQUIRED_TABLES.difference(existing_tables)
             if missing:
                 raise StorageOpenError("V2 data root is missing required schema objects")
-            _validate_table_shapes(connection, V68_SCHEMA_STATEMENTS, V68_REQUIRED_TABLES)
+            _validate_table_shapes(connection, V68_SCHEMA_STATEMENTS, V68_REQUIRED_TABLES,
+                                   allow_extra=forward_compatible)
             # Each schema migration runs a full integrity check at its boundary.
             # Rechecking every page and foreign key on every normal startup makes
             # open time grow with the data store, even when the schema is current.
@@ -3114,6 +3267,8 @@ def _validate_table_shapes(
     connection: sqlite3.Connection,
     statements: tuple[str, ...],
     tables: frozenset[str],
+    *,
+    allow_extra: bool = False,
 ) -> None:
     # Let SQLite interpret its DDL so column checks cannot drift from the schema.
     expected = sqlite3.connect(":memory:")
@@ -3131,8 +3286,21 @@ def _validate_table_shapes(
             for pragma in ("table_info", "foreign_key_list"):
                 query = f'PRAGMA {pragma}("{table}")'
                 actual_rows = [tuple(row) for row in connection.execute(query)]
-                if actual_rows != expected.execute(query).fetchall():
-                    raise StorageOpenError(f"V2 table structure does not match: {table}")
+                expected_rows = [tuple(row) for row in expected.execute(query).fetchall()]
+                if actual_rows == expected_rows:
+                    continue
+                # Newer additive releases may append a defaulted column.  Accept
+                # that shape without weakening the strict check for the current
+                # schema or allowing a changed/removed declared column.
+                if (allow_extra and pragma == "table_info"
+                        and len(actual_rows) > len(expected_rows)
+                        and actual_rows[:len(expected_rows)] == expected_rows
+                        and all(row[4] is not None or row[3] == 0 for row in actual_rows[len(expected_rows):])):
+                    continue
+                if (allow_extra and pragma == "foreign_key_list"
+                        and all(row in actual_rows for row in expected_rows)):
+                    continue
+                raise StorageOpenError(f"V2 table structure does not match: {table}")
             # Runtime owners may add optimization indexes after the schema is
             # current (the native-conversation module indexes conversation_batches).
             # An extra index cannot corrupt the declared shape, so require every

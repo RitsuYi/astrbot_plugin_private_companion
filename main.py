@@ -18,6 +18,11 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .astrbot_host.upgrade_source import preserve_host_configuration
 
+# Keep recent plugin log records in memory for the governance page. This is
+# process-local and dashboard-only; it never creates or rotates a log file.
+from .astrbot_host.log_buffer import install_log_buffer
+install_log_buffer()
+
 # AstrBot can prune keys unknown to the new schema before constructing the Star.
 preserve_host_configuration()
 
@@ -126,8 +131,10 @@ CORE_REPLY_IDENTITY_FAILURE_PREFIXES = (
     "host_persona_", "host_conversation_", "host_native_lookup_timeout", "host_core_reply_capture_failed",
 )
 RETRYABLE_HOST_STARTUP_CODES = frozenset({
-    "host_platform_unavailable", "host_account_unavailable", "host_persona_unavailable",
+    "host_platform_unavailable", "host_platform_changed", "host_account_unavailable",
+    "host_account_changed", "host_persona_unavailable",
     "host_persona_window_unbound", "host_conversation_changed", "host_startup_failed",
+    "host_provider_unavailable",
     "staging_preflight_failed",
 })
 # A denied final send is the one refusal the user feels as silence, and it is
@@ -179,6 +186,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             self._startup_failure_key = None
             self._startup_failure_at = 0.0
             self._session_settings_warm_task = None
+            self._qzone_life_publisher = None
             self.config = config if config is not None else {}
             default_data_root = resolve_data_root(Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve())
             data_root = prepare_storage_root(default_data_root, self.config)
@@ -198,6 +206,13 @@ class PrivateCompanionV2StagingPlugin(Star):
                         config_object.save_config()
                     except Exception:
                         logger.warning("[CompanionV2] 旧单目标设置已在内存迁移，但持久化失败", exc_info=True)
+            try:
+                repaired = self.staging.repair_legacy_config()
+            except Exception:
+                repaired = {}
+                logger.warning("[CompanionV2] 旧配置自愈检查失败", exc_info=True)
+            if repaired:
+                logger.warning("[CompanionV2] 启动时已自动修复旧策略字段：%s", repaired)
             # One public facade exposes the body and its seven internal modules.
             # Independent third-party integrations use their documented APIs.
             self.extension_api = UnifiedCompanionExtensionAPI(self.staging)
@@ -470,6 +485,11 @@ class PrivateCompanionV2StagingPlugin(Star):
         if self._session_settings_warm_task is None or self._session_settings_warm_task.done():
             self._session_settings_warm_task = asyncio.create_task(
                 warm_session_settings(), name="companion-v2-session-settings-warmup")
+        # Started here, not after the host is up: the driver polls and no-ops
+        # until a running session exists, so a slow boot cannot lose it.
+        if self._qzone_life_publisher is None:
+            from .astrbot_host.qzone_life_publish import QzoneLifePublisher
+            self._qzone_life_publisher = QzoneLifePublisher(self.staging).start()
         if self.staging.settings is None or not self.staging.settings.enabled:
             logger.info("[CompanionV2] 共享宿主已加载，等待账号与人格配置")
             return
@@ -477,6 +497,8 @@ class PrivateCompanionV2StagingPlugin(Star):
             self._schedule_host_start()
 
     async def _try_start_host(self) -> bool:
+        if getattr(self.staging, "_stopped_by_user", False):
+            return True
         try:
             readiness = self.staging.startup_readiness()
         except Exception as error:
@@ -502,7 +524,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             if not loaded.unwrap()["loaded"]:
                 # Account/persona mappings are sufficient to create the shared
                 # installation. The old core-window binding was only a first-run bootstrap.
-                initialized = await self.staging.initialize_profile()
+                initialized = await self.staging.initialize_profile(automatic=True)
                 if initialized.failure is not None:
                     if initialized.failure.code == "host_terminated":
                         return True
@@ -512,9 +534,11 @@ class PrivateCompanionV2StagingPlugin(Star):
                     return not retry
                 initialized_profile = True
 
-        started = await self.staging.start()
+        if getattr(self.staging, "_stopped_by_user", False):
+            return True
+        started = await self.staging.start(automatic=True)
         if started.failure is not None:
-            if started.failure.code == "host_terminated":
+            if started.failure.code in ("host_terminated", "host_manually_stopped"):
                 return True
             retry = self._retry_startup_failure(started.failure.code)
             self._note_startup_failure("start", started.failure.code,
@@ -554,12 +578,19 @@ class PrivateCompanionV2StagingPlugin(Star):
                            code, error_type or "unknown", detail or "unavailable")
 
     def _schedule_host_start(self) -> None:
-        if self.staging._terminated:
+        if self.staging._terminated or getattr(self.staging, "_stopped_by_user", False):
             return
         session = self.staging.session
         if (self.staging._accepting and session is not None
                 and session.application.state == "running"):
-            return
+            try:
+                bridges_current = self.staging.native_bridges_current()
+            except Exception as error:
+                logger.warning("[CompanionV2] 平台桥接状态检查失败 error_type=%s", type(error).__name__)
+                bridges_current = False
+            if bridges_current:
+                return
+            self.staging._accepting = False
         task = self._host_start_task
         if task is None or task.done():
             self._host_start_task = asyncio.create_task(
@@ -590,6 +621,7 @@ class PrivateCompanionV2StagingPlugin(Star):
     @filter.on_platform_loaded()
     async def on_companion_platform_loaded(self) -> None:
         if self.staging.settings is not None and self.staging.settings.enabled:
+            await self.staging.recover_accounts()
             self._schedule_host_start()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=240000)
@@ -670,6 +702,13 @@ class PrivateCompanionV2StagingPlugin(Star):
         event_ref = prepared.get("event_ref")
         origin_key = prepared.get("origin_key")
         channel = prepared.get("channel")
+        session = getattr(self.staging, "session", None)
+        connection_callbacks = {}
+        if prepared.get("connection_lease") is not None:
+            connection_callbacks = {
+                "assert_connection_current": lambda: session.assert_connection_current(prepared),
+                "wait_connection_changed": lambda: session.wait_connection_changed(prepared),
+            }
 
         async def authorize_core_send(current):
             return await self.staging.authorize_core_reply(event, target, current)
@@ -721,6 +760,7 @@ class PrivateCompanionV2StagingPlugin(Star):
 
         observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
         return {
+            **connection_callbacks,
             "authorize": authorize_core_send,
             "on_denied": note_core_send_denied,
             "on_sent": observe_core_send,
@@ -1256,7 +1296,16 @@ class PrivateCompanionV2StagingPlugin(Star):
         config_getter = getattr(native, "get_config", None)
         if not all(callable(method) for method in (getter, all_providers, config_getter)):
             return
-        from astrbot.core.astr_main_agent import _provider_supports_modality
+        try:
+            from astrbot.core.astr_main_agent import _provider_supports_modality
+        except ModuleNotFoundError as error:
+            if error.name != "astrbot.core.astr_main_agent":
+                raise
+
+            def _provider_supports_modality(provider, modality):
+                config = getattr(provider, "provider_config", None)
+                modalities = config.get("modalities") if isinstance(config, Mapping) else None
+                return not modalities or isinstance(modalities, list) and modality in modalities
 
         selected = event.get_extra("selected_provider")
         current = getter(selected) if isinstance(selected, str) and selected else None
@@ -1284,6 +1333,58 @@ class PrivateCompanionV2StagingPlugin(Star):
         logger.warning("[CompanionV2] 本轮视频没有可用的图片输入模型 event_ref=%s",
                        prepared.get("event_ref"))
 
+    async def _route_core_peak_provider(self, event):
+        """Apply a saved time-window replacement to this core reply only.
+
+        The core reads ``selected_provider`` from the event before resolving the
+        provider, so a peak rule can switch this turn's model without rewriting
+        the session's saved model (or whatever the dashboard selected).
+        """
+        if event.get_extra("selected_provider"):
+            # Video routing already chose a vision provider for this turn.
+            return
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        prepared = state.get("prepared") if isinstance(state, dict) else None
+        if not isinstance(prepared, Mapping):
+            return
+        context = prepared.get("context")
+        application = getattr(getattr(self.staging, "session", None), "application", None)
+        if context is None or application is None:
+            return
+        if not hasattr(context, "scope") or not hasattr(context, "actor"):
+            return
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.model_gateway.replacement_rules import checked_rules, match_route
+        at = application.tasks.now()
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
+                              context.role_binding.role, context.scope)
+        snapshot = application.configuration.read(context.actor, target=target,
+            group_id="model.conversation.reply", observed_at=at)
+        if not snapshot.is_success:
+            return
+        snapshot = snapshot.unwrap()
+        values = {name.rsplit(".", 1)[1]: item.value for name, item in snapshot.fields.items()}
+        if values.get("replacement_scope") == "plugin":
+            # The saved scope says these rules belong to plugin tasks only.
+            return
+        try:
+            rules = checked_rules(values.get("replacement_rules", "[]"))
+        except ValueError:
+            return
+        match = match_route(rules, str(prepared.get("text") or ""), at)
+        if match is None or not match.provider_id:
+            return
+        native = getattr(self.staging, "context", None)
+        getter = getattr(native, "get_provider_by_id", None)
+        provider = getter(match.provider_id) if callable(getter) else None
+        if provider is None:
+            logger.warning("[CompanionV2] 时段替换的 Provider 不可用 event_ref=%s provider=%s",
+                           prepared.get("event_ref"), match.provider_id)
+            return
+        event.set_extra("selected_provider", match.provider_id)
+        logger.info("[CompanionV2] 时段替换对话模型 event_ref=%s provider=%s rule=%s reason=%s",
+                    prepared.get("event_ref"), match.provider_id, match.rule_id, match.reason)
+
     @filter.on_waiting_llm_request(priority=-1000000)
     async def observe_companion_core_waiting_llm_request(self, event: AstrMessageEvent):
         observe_core_waiting_llm_request(event, now=self.staging.now)
@@ -1291,6 +1392,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             await self._route_core_video_to_image_provider(event)
         except Exception as error:
             logger.warning("[CompanionV2] 视频视觉路由暂不可用 error_type=%s", type(error).__name__)
+        try:
+            await self._route_core_peak_provider(event)
+        except Exception as error:
+            logger.warning("[CompanionV2] 时段替换暂不可用 error_type=%s", type(error).__name__, exc_info=True)
 
     @filter.on_llm_request(priority=250000)
     async def prepare_companion_core_request(self, event: AstrMessageEvent, req):
@@ -1735,6 +1840,40 @@ class PrivateCompanionV2StagingPlugin(Star):
         activate_core_reply_tracking(event)
         activate_core_reply_segmentation(event)
 
+    @filter.on_decorating_result(priority=999999)
+    async def suppress_companion_native_tool_repeat(self, event: AstrMessageEvent):
+        """Check the complete final result before AstrBot splits or speaks it."""
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        result = event.get_result()
+        if (not isinstance(state, dict) or not state.get("delivery_guard_active")
+                or getattr(getattr(result, "result_content_type", None), "name", None) != "LLM_RESULT"
+                or not getattr(result, "chain", None)):
+            return
+        get_config = getattr(getattr(self, "context", None), "get_config", None)
+        if not callable(get_config):
+            return
+        config = get_config(event.unified_msg_origin)
+        settings = config.get("platform_settings") if isinstance(config, Mapping) else None
+        if not isinstance(settings, Mapping):
+            return
+        if (config.get("t2i") or getattr(result, "use_t2i_", False)
+                or settings.get("reply_prefix") or settings.get("reply_with_quote")
+                or settings.get("reply_with_mention")):
+            return
+        if event.get_platform_name() == "aiocqhttp":
+            try:
+                if len(result.get_plain_text()) > int(settings["forward_threshold"]):
+                    return
+            except (KeyError, TypeError, ValueError):
+                return
+        from astrbot.core.message.message_event_result import MessageChain
+        from .astrbot_host.core_reply_voice import capture_core_voice_message
+        from .astrbot_host.core_reply_idempotency import should_drop_native_tool_response
+
+        visible = capture_core_voice_message(event, MessageChain(chain=list(result.chain)))
+        if should_drop_native_tool_response(event, visible):
+            result.chain.clear()
+
     def _observe_session(self, event: AstrMessageEvent) -> None:
         try:
             self.staging.session_topology.schedule_observe(event)
@@ -1815,6 +1954,13 @@ class PrivateCompanionV2StagingPlugin(Star):
                 await settings_task
             except asyncio.CancelledError:
                 pass
+        qzone_publisher = getattr(self, "_qzone_life_publisher", None)
+        self._qzone_life_publisher = None
+        if qzone_publisher is not None:
+            try:
+                await qzone_publisher.close()
+            except Exception as error:
+                logger.warning("[CompanionV2] 生活说说停机清理失败 error_type=%s", type(error).__name__)
         startup_task = getattr(self, "_host_start_task", None)
         self._host_start_task = None
         if startup_task is not None and not startup_task.done():

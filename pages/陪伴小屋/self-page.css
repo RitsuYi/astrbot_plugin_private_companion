@@ -158,7 +158,7 @@
 .self-relationship-badge{display:inline-flex;align-items:center;min-height:24px;padding:2px calc(var(--sp-3) * .75);border:1px solid color-mix(in srgb,var(--t-accent) 35%,var(--t-line));
   border-radius:var(--r-pill);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-size:var(--fs-micro);white-space:nowrap}
 .self-relationship-meta{display:flex;flex-wrap:wrap;gap:calc(var(--sp-1) * 1.5)}
-.self-relationship-meta span{display:inline-flex;align-items:center;gap:calc(var(--sp-1) * 1.25);max-width:100%;padding:var(--sp-1) var(--sp-2);border:1px solid var(--t-line);
+.self-relationship-meta>span{display:inline-flex;align-items:center;gap:calc(var(--sp-1) * 1.25);max-width:100%;padding:var(--sp-1) var(--sp-2);border:1px solid var(--t-line);
   border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-text-soft);font-size:var(--fs-micro);overflow-wrap:anywhere}
 .self-relationship-meta b{color:var(--t-text-faint);font-weight:500}
 .self-relationship-picker{display:flex;align-items:center;gap:calc(var(--sp-1) * 1.5);min-width:min(100%,250px);max-width:100%;color:var(--t-text-faint);font-size:var(--fs-micro)}
@@ -189,7 +189,8 @@
 .self-contact-switch{display:flex;align-items:center;gap:var(--sp-2);min-width:0;min-height:42px;padding:var(--sp-2) var(--sp-3);
   border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-text-soft);cursor:pointer}
 .self-contact-switch input{flex:none;width:18px;height:18px;accent-color:var(--t-accent)}
-.self-contact-switch span{display:grid;gap:2px;min-width:0}
+.self-contact-switch>label{display:flex;align-items:center;gap:var(--sp-2);flex:1;min-width:0}
+.self-contact-field-label,.self-save-actions{display:flex;align-items:center;gap:var(--sp-2)}
 .self-contact-switch strong{color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600}
 .self-contact-switch small,.self-relationship-field>span small{display:block;color:var(--t-text-faint);font-size:var(--fs-micro);font-weight:400}
 .self-contact-switch:focus-within{outline:2px solid var(--t-accent);outline-offset:2px}
@@ -274,6 +275,7 @@
 .role-profile-draft-compose textarea{min-height:76px;padding:var(--sp-2) var(--sp-3)}
 .role-profile-draft-compose select{min-height:40px;padding:0 var(--sp-3);resize:none}
 .role-profile-draft-persona{display:grid;gap:var(--sp-1)}
+.role-profile-draft-persona select{overflow-y:auto;overscroll-behavior:contain}
 .role-profile-draft-source-picks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-2)}
 .role-profile-draft-field textarea{min-height:72px;padding:var(--sp-2)}
 .role-profile-draft-field select{min-height:42px;padding:0 var(--sp-3)}
@@ -489,3 +491,36 @@ body.reduce-motion .role-profile-draft-dialog *::after{transition:none}
 .humanize-summary span{color:var(--t-accent);font-size:var(--fs-body)}
 .humanize-list{margin:0;padding-left:20px;display:grid;gap:8px;color:var(--t-ink);font-size:var(--fs-body);line-height:1.65}
 .humanize-note{margin:12px 0 0;color:var(--t-muted);font-size:var(--fs-micro);line-height:1.6}
+
+/* 2026-11 视觉校准：自我页以一张安静的档案卡开场，信息层级向 7.1.8 的 hero 靠拢。 */
+.self-page{max-width:1180px;gap:var(--sp-5)}
+.journal-cover{position:relative;padding:var(--sp-4) var(--sp-5);border:1px solid var(--t-line);
+  border-radius:var(--r-lg);background:linear-gradient(120deg,var(--t-surface-raised),var(--t-surface) 70%);
+  box-shadow:0 18px 36px -30px color-mix(in srgb,var(--t-text-strong) 45%,transparent)}
+.journal-cover::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;border-radius:var(--r-lg) 0 0 var(--r-lg);
+  background:linear-gradient(var(--t-accent),color-mix(in srgb,var(--t-accent) 30%,transparent))}
+.portrait{width:76px;border-radius:var(--r-md);box-shadow:0 8px 20px -14px color-mix(in srgb,var(--t-text-strong) 60%,transparent)}
+.journal-name-row h2{font-size:clamp(21px,2.2vw,27px);letter-spacing:.02em}
+.journal-id{gap:var(--sp-2)}
+.deck-tabs{background:var(--t-surface-soft);border-radius:var(--r-md);padding:4px;border:1px solid var(--t-line)}
+.deck-tab{min-height:38px;border-radius:calc(var(--r-md) - 3px)}
+.deck-panels{min-height:520px}
+.section-chips{top:12px;padding-bottom:var(--sp-1)}
+@media (max-width:720px){
+  .journal-cover{padding:var(--sp-3);grid-template-columns:auto minmax(0,1fr)}
+  .journal-side{grid-column:1/-1;justify-content:flex-start}
+  .portrait{width:56px}
+}
+.deck-tabs{max-width:760px}
+@media (max-width:720px){
+  .deck-tabs{max-width:none}
+}
+/* 自我页档案行：标签列略放宽，控件从统一左边界起排，避免长昵称/日期组被挤到右边缘。 */
+.self-page .wb-journal .wb-identity-rows .wb-field-main{grid-template-columns:96px minmax(0,1fr);column-gap:var(--sp-4)}
+.self-page .wb-journal .wb-identity-rows .wb-control{justify-content:flex-start}
+.self-page .wb-journal .wb-identity-rows .wb-chip-opts{gap:calc(var(--sp-1) * 1.5)}
+.self-page .wb-journal .wb-identity-rows .wb-date{width:100%}
+@media (max-width:720px){
+  .self-page .wb-journal .wb-identity-rows .wb-field-main{grid-template-columns:minmax(0,1fr);row-gap:var(--sp-1)}
+  .self-page .wb-journal .wb-identity-rows .wb-control{width:100%}
+}

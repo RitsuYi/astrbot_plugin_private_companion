@@ -713,7 +713,7 @@ window.CompanionSetup = (() => {
   };
   const TASK_LABELS = {
     "conversation.reply":"对话回复", "proactive.plan":"主动联系规划", "proactive.compose":"主动联系写作", "proactive.judge":"主动内容审核",
-    "memory.reflect":"记忆整理", "role.state.maintain":"角色状态", "calendar.plan":"日程规划",
+    "memory.reflect":"事实整理", "role.state.maintain":"角色状态", "calendar.plan":"日程规划",
     "role.growth.progress":"成长进展", "role.self_review":"自我复盘", "role.expression.learn":"表达学习",
     "role.expression.review":"回复表达复核", "role.expression.contact_review":"主动表达复核",
     "role.reading.consume":"阅读理解", "image.review":"图片审核", "context.caption":"图片描述",
@@ -2972,7 +2972,7 @@ window.CompanionSetup = (() => {
       <div class="setup-question-card">
         <p class="setup-kicker">本步只问一件事</p>
         <h3>先选一个插件通用模型</h3>
-        <p>日常聊天仍然使用 AstrBot 当前人格和主模型；这里只决定主动联系、日程、状态和记忆整理这些后台任务用哪个模型。</p>
+        <p>日常聊天仍然使用 AstrBot 当前人格和主模型；这里只决定主动联系、日程、状态和事实整理这些后台任务用哪个模型。</p>
         <ul class="setup-question-points">
           <li>选择插件通用模型：先选一个能稳定调用的文本模型即可，不必一开始就分得很细</li>
           <li>保存后会沿用为后台任务的默认模型，仍可逐项覆盖</li>
@@ -3843,7 +3843,10 @@ window.CompanionSetup = (() => {
       } else if (action === "save-model") {
         const saved = await api("POST", "/model", {provider_id: modelDraft});
         modelTaskDrafts = {};
-        notice = saved?.restart_required || saved?.data?.restart_required
+        const deferred = saved?.init_deferred === true || saved?.data?.init_deferred === true;
+        notice = deferred
+          ? `模型已保存。${(saved?.init_reason || saved?.data?.init_reason) || "配置的 Bot 账号当前未连接 AstrBot。"}账号连上后回到这一步再点一次即可完成初始化。`
+          : saved?.restart_required || saved?.data?.restart_required
           ? "模型已保存；当前宿主仍在运行，重载插件后使用新模型。"
           : "已初始化模型；任务路由可直接选择 AstrBot 当前已加载的 Provider。";
       } else if (action.startsWith("save-task:")) {

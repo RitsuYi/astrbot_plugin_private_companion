@@ -18,6 +18,7 @@ class MultiLifeTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_inventory_private_routes_and_two_accounts_two_personas_keep_own_books(self):
         app = await self.initialize(group_config())
         ids, receipts = set(), set()
+        titles = {}
         for target, role in self.paths:
             path = self.paths[(target, role)]
             if target.startswith("group-"):
@@ -35,10 +36,27 @@ class MultiLifeTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((status["target_id"], status["role_id"], status["profile_id"]), (target, role, "shared-test"))
                 self.assertEqual(len(status["activities"]), 1)
                 self.assertTrue(status["activities"][0]["title"].startswith(target + role))
+                titles[target, role] = status["activities"][0]["title"]
                 self.assertEqual((status["running"], status["receipts"], status["journals"]), ([], [], []))
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.selections, {"qq-main": "original", "qq-second": "original"})
         self.assertTrue(all(r.instruction is None for r in app.life_runtime.routines.values()))
+        store = app.configuration.store
+        (await self.controller.stop()).unwrap()
+        for _ in range(2):
+            for target in ("first", "second"):
+                for role in ("role-a", "role-b"):
+                    status = await self.status(target, role)
+                    self.assertEqual(status["host_state"], "stopped")
+                    self.assertTrue(status["config"]["enabled"])
+                    self.assertFalse(status["config"]["diary_enabled"])
+                    self.assertEqual(len(status["activities"]), 1)
+                    self.assertEqual(status["activities"][0]["title"], titles[target, role])
+                    self.assertEqual(status["running"], [])
+        self.assertEqual(app.life_runtime.active_handles, ())
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        restarted = await self.start()
+        self.assertIs(restarted.configuration.store, store)
 
     async def test_request_identity_tokens_and_foreign_activity_are_rejected(self):
         app = await self.initialize()
@@ -99,6 +117,7 @@ class MultiLifeTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_original_personas_read_write_sleep_and_dream_independently(self):
         self.native.selections["qq-second"] = "second"
+        self.window_personas["qq-second:FriendMessage:200"] = "second"
         app = await self.initialize()
         pairs = (("first", "role-a", "原人格"), ("second", "role-b", "第二人格"))
         for target, role, _ in pairs:
@@ -135,13 +154,15 @@ class MultiLifeTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(dreams), 1, status)
             self.assertIn(persona, dreams[0]["body"])
             self.assertIsNone((await self.status(target, role))["failure_code"])
-        generations = app.runtime.read_all("SELECT generation FROM configuration_applications WHERE group_id = 'role.life'", ())
+        generations = app.configuration.store.read_all(
+            "SELECT generation FROM configuration_applications WHERE group_id = 'role.life'", ())
         self.assertEqual({r["generation"] for r in generations}, {1})
         self.assertEqual(len(generations), 2)
         self.assertTrue(all(not p.client._api._wsr_api.calls for p in self.native.platforms.values()))
 
     async def test_daily_schedules_keep_own_context_time_and_configuration_generation(self):
         self.native.selections["qq-second"] = "second"
+        self.window_personas["qq-second:FriendMessage:200"] = "second"
         app = await self.initialize()
         for target, role, at in (("first", "role-a", "08:01"), ("second", "role-b", "08:02")):
             await self.enable(target, role, diary_enabled=True, diary_time=at)

@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
-    event_account_id, event_peer_id, native_id, supported_platform_name, platform_event_matches,
+    event_account_id, event_peer_id, native_id, platform_event_matches, supported_platform_name,
 )
 from companion_v2.adapters.astrbot.staging_bootstrap import AstrBotStagingBootstrap
 from companion_v2.adapters.astrbot.staging_config import StagingConfiguration, StagingConfigurationError
@@ -478,7 +478,7 @@ class AstrBotStagingController:
                                      default_provider_resolver=conversation_provider_resolver(self.context),
                                      weather_port=weather_port,
                                      weather_alert_port=weather_alert_port,
-                                     balance_port=configured_balance_port(self.config),
+                                     balance_port=configured_balance_port(self.config, context=self.context),
                                      news_port=configured_news_port(self.config, context=self.context,
                                          deepseek_provider_resolver=search_provider_resolver,
                                          search_priority_resolver=search_settings.source_priority),
@@ -632,7 +632,8 @@ class AstrBotStagingController:
         if self.runtime is None:
             raise HostControlError("staging_not_initialized", "initialize the staging profile first")
         task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
-        model = self.runtime.read_one(
+        configuration = getattr(getattr(self.session, "application", None), "configuration", None)
+        model = (configuration.store if configuration is not None else self.runtime).read_one(
             "SELECT generation FROM configuration_consumers WHERE consumer_id = ?", (CONSUMER,)
         )
         return (task["generation"] if task else 0, model["generation"] if model else 0)
@@ -869,7 +870,7 @@ class AstrBotStagingController:
         if (
             not isinstance(event, self.native_types.event)
             or getattr(event, "unified_msg_origin", None)
-            != f"{scope.platform}:FriendMessage:{scope.native_scope_id}"
+            != f"{scope.platform}:FriendMessage:{scope.session_id}"
             or session.application.state != "running"
         ):
             return False

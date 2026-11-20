@@ -33,6 +33,7 @@ from companion_v2.conversation.self_review_context import ConversationSelfReview
 from companion_v2.conversation.style_context import ConversationExpressionStyleContext, EXPRESSION_STYLE_INSTRUCTION
 from companion_v2.conversation.open_items_context import OpenItemsReader
 from companion_v2.configuration.models import ConfigurationError
+from companion_v2.storage.image_migration import migrate_image_payloads_in_background
 from companion_v2.configuration.service import ConfigurationService
 from companion_v2.conversation.delivery import LocalConversationDelivery
 from companion_v2.conversation.pokes import PokeReplyModel
@@ -123,6 +124,8 @@ from companion_v2.references.wardrobe import (WardrobeConfigurationOwner, Wardro
 from companion_v2.qzone.configuration import (QzoneConfigurationOwner, QzoneSettings,
     configuration_fields as qzone_configuration_fields)
 from companion_v2.qzone.service import QzoneService
+from companion_v2.system_prompts.configuration import (
+    RoleSystemPromptConfigurationOwner, configuration_fields as system_prompt_configuration_fields)
 from companion_v2.relationships.private_access import (PrivateAccessSettings,
     configuration_fields as private_access_configuration_fields)
 from companion_v2.relationships.private_notice import PrivateAccessGate, PrivateRefusalNotice
@@ -218,9 +221,9 @@ class CompanionApplication:
                  runtime_identity=None, presence_port=None, segmentation=SegmentationPolicy(), voice_policy=None,
                  weather_port=None, weather_alert_port=None, balance_port=None, news_port=None,
                  solar_term_port=None, budget_soft=None, capability_owners=(),
-                 qzone_transport=None, default_provider_resolver=None,
+                 qzone_transport=None, default_provider_resolver=None, provider_lookup=None,
                  knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH, wake_port=None,
-                 search_port_factory=None):
+                 search_port_factory=None, configuration_store=None, reference_owner_resolver=None):
         if type(owns_runtime) is not bool or not any(p.kind == REPLY_KIND and p.lane is Lane.FOREGROUND for p in profiles):
             raise ValueError("assembly requires a foreground reply profile and explicit runtime ownership")
         if external is not None and (external.runtime is not runtime or external.messages is not None):
@@ -229,6 +232,10 @@ class CompanionApplication:
         if external is not None and limits.foreground_slots < 2:
             raise ValueError("external tools need capacity for both parent and child")
         self.runtime, self.owns_runtime = runtime, owns_runtime
+        self.configuration_store = configuration_store if configuration_store is not runtime else None
+        if self.configuration_store is not None:
+            runtime.attach_configuration_store(self.configuration_store)
+        configuration_runtime = configuration_store or runtime
         self.now = now or (lambda: datetime.now(timezone.utc))
         # 关键词材料（如服务余额）只有登记项自己需要时才会去取；端口留着由它按需调用。
         self.balance_port = balance_port
@@ -267,12 +274,13 @@ class CompanionApplication:
             *qzone_configuration_fields(),
             *private_access_configuration_fields(),
             *relay_configuration_fields(),
+            *system_prompt_configuration_fields(),
             *(field for owner in capability_owners for field in owner.fields),
             *content_authoring_configuration_fields(), *content_cover_configuration_fields()) if f.field_id not in registry.fields)
         if extra:
             registry = FieldRegistry(version=registry.version, fields=tuple(registry.fields.values()) + extra)
         reference_configuration_owner = ReferenceConfigurationOwner(runtime)
-        self.configuration = ConfigurationService(runtime, with_contact_fields(registry),
+        self.configuration = ConfigurationService(runtime, with_contact_fields(registry), store=configuration_runtime,
             owners=(ContactConfigurationOwner(runtime), GrowthConfigurationOwner(runtime),
                 SkillConfigurationOwner(runtime), RoleProfileConfigurationOwner(runtime),
                 RelationshipProfileConfigurationOwner(runtime),
@@ -291,9 +299,10 @@ class CompanionApplication:
                     reference_configuration_owner,
                     WardrobeConfigurationOwner(runtime),
                     QzoneConfigurationOwner(runtime),
+                    RoleSystemPromptConfigurationOwner(runtime),
                     *capability_owners))
         try:
-            migrate_presence_to_role(runtime)
+            migrate_presence_to_role(configuration_runtime)
         except Exception as error:
             logger.warning("[CompanionV2] QQ presence scope migration failed error_type=%s", type(error).__name__)
         self.reply_settings = ReplySettings(self.configuration)
@@ -302,8 +311,10 @@ class CompanionApplication:
         self.recall_settings = RecallSettings(self.configuration)
         self.relay_settings = RelaySettings(self.configuration)
         self.library_settings = LibrarySettings(self.configuration)
-        self.reference_settings = ReferenceSettings(reference_configuration_owner)
-        self.wardrobe_settings = WardrobeSettings(self.configuration)
+        self.reference_settings = ReferenceSettings(reference_configuration_owner,
+                                                    owner_resolver=reference_owner_resolver)
+        self.wardrobe_settings = WardrobeSettings(self.configuration,
+                                                 target_resolver=self.reference_settings.target)
         self.qzone_settings = QzoneSettings(self.configuration)
         # Without a host transport the extension is simply absent: no credentials,
         # no session and no partially usable Zone path.
@@ -341,6 +352,7 @@ class CompanionApplication:
         self.screen_interpretation = ScreenInterpretationService(runtime, notify=self.notify)
         self.screen_peek = ScreenPeekService(runtime, notify=self.notify)
         self.authoring = ContentAuthoringWorkflow(runtime)
+        self.scheduled_authoring = None
         self.poke_reply_model = PokeReplyModel(runtime, now=self.now)
         self.poke_context_tasks = set()
         registrations = (
@@ -447,7 +459,8 @@ class CompanionApplication:
         self.messages.reply_images.enabled = sender.supports_images
         self.messages.reply_pokes = sender.supports_poke
         self.router = ModelRouter(self.configuration, profiles, providers,
-                                  default_provider_resolver=default_provider_resolver)
+                                  default_provider_resolver=default_provider_resolver,
+                                  provider_lookup=provider_lookup)
         self.gateway = LocalModelGateway(self.router, BudgetLedger(runtime, budget, budget_soft), self.tasks)
         self.authoring.attach(self.gateway, require_running=self.require_running)
         self.background_waiting = BackgroundTaskQueue(self.tasks)
@@ -502,7 +515,7 @@ class CompanionApplication:
                                                 notify=self.notify)
         self.proactive.schedule = self.contact_schedule
         self.role_reader.attach(self.gateway, self.role_reading, require_running=self.require_running,
-                                waiting=self.background_waiting)
+                                waiting=self.background_waiting, calendar=self.calendar)
         self.journal_triggers = JournalTriggers(self.journal_writer, self.journal_material_collector,
                                                 require_running=self.require_running)
         self.journal_schedule = JournalScheduleDriver(self.journal_triggers, notify=self.notify)
@@ -555,6 +568,7 @@ class CompanionApplication:
         self._next_contact_delivery_check = 0.0
         self._workers = {}
         self._storage_closed = False
+        self._image_migration_task = None
         self._closing = asyncio.Lock()
         from companion_v2.delivery.presence import PresenceCoordinator
         self.presence = PresenceCoordinator(self, presence_port) if presence_port is not None else None
@@ -563,6 +577,30 @@ class CompanionApplication:
         if self.state != "running":
             raise TaskError("host_not_running", "host intake is not active")
         require(self.tasks.check_generation())
+
+    def clear_caches(self):
+        """Drop regenerable in-process caches; stored data is never touched.
+
+        The maintenance page exposes this as the only safe "clear cache"
+        action: image descriptions, failed description attempts and diagnostic
+        reports are rebuilt on demand, while conversations, memories, journals
+        and sent media stay exactly as they were.
+        """
+        cleared = {}
+        narration = getattr(self, "image_narration", None)
+        cache = getattr(narration, "cache", None)
+        if cache is not None:
+            cleared["image_narration"] = len(cache)
+            cache.clear()
+        failures = getattr(narration, "failures", None)
+        if failures is not None:
+            cleared["image_narration_failures"] = len(failures)
+            failures.clear()
+        reports = getattr(getattr(self, "diagnostics", None), "_reports", None)
+        if isinstance(reports, dict):
+            cleared["diagnostics"] = len(reports)
+            reports.clear()
+        return cleared
 
     def _record_failure(self, error, fallback):
         self.failure_code = error.code if isinstance(error, TaskError) else fallback
@@ -660,6 +698,10 @@ class CompanionApplication:
                 await asyncio.sleep(0)
             require(self.tasks.check_generation())
             self.state = "running"
+            self._image_migration_task = asyncio.create_task(
+                migrate_image_payloads_in_background(self.runtime),
+                name="companion-v2:image-payload-migration",
+            )
             self._reconcile_contact_reactions()
             self.memory_schedule.start_recovery()
             self._driver = asyncio.create_task(self._drive(), name="companion:conversation-host")
@@ -1176,6 +1218,10 @@ class CompanionApplication:
             await self.memory_reflection.close()
             await self.proactive.close()
             await self.contact_schedule.close()
+            if self._image_migration_task is not None and not self._image_migration_task.done():
+                self._image_migration_task.cancel()
+                await asyncio.gather(self._image_migration_task, return_exceptions=True)
+            self._image_migration_task = None
             if self.external is not None:
                 await self.external.close()
             for task_id, (_, worker) in tuple(self._workers.items()):
@@ -1189,4 +1235,5 @@ class CompanionApplication:
                 if self.owns_runtime:
                     self.runtime.close()
                     self._storage_closed = True
+                # An externally owned runtime keeps both stores for stopped views.
             return ShutdownReport(self.state, handles, self._storage_closed)

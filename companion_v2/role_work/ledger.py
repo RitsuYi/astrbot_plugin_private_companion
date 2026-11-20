@@ -64,6 +64,19 @@ class PersistentRoleLifeLedger:
             raise ReferenceValidationError("activity identity does not match its owner index")
         return activity
 
+    def delete_activity(self, activity_id: str, *, owner: RoleOwnerRef) -> RoleActivity:
+        """Remove one role-owned activity and every historical revision it owns."""
+        key = self._owner_key(owner)
+        activity = self.activity(activity_id, owner=owner)
+        with self.runtime.transaction() as connection:
+            connection.execute("DELETE FROM role_artifacts WHERE owner_key = ? AND activity_id = ?",
+                               (key, activity_id))
+            connection.execute("DELETE FROM role_activity_revisions WHERE owner_key = ? AND activity_id = ?",
+                               (key, activity_id))
+            connection.execute("DELETE FROM role_activities WHERE owner_key = ? AND activity_id = ?",
+                               (key, activity_id))
+        return activity
+
     def _remember_revision(self, connection, activity, operation_id=None):
         key = self._owner_key(activity.owner)
         previous = connection.execute("""SELECT record_json FROM role_activity_revisions
@@ -97,6 +110,27 @@ class PersistentRoleLifeLedger:
             ORDER BY activity_id LIMIT ?""",
             (self._owner_key(owner), state.value if state else None, state.value if state else None,
              after_id, after_id, limit))
+        return tuple(activity_from_json(row["record_json"]) for row in rows)
+
+    def archive_activities(self, owner, scope, *, after_id=None, limit=30):
+        """Page by import time with contiguous, ascending offsets within a book."""
+        self._page(limit, after_id)
+        rows = self.runtime.read_all("""WITH archive AS (
+                SELECT record_json, activity_id, json_extract(record_json, '$.started_at') AS started,
+                    COALESCE(json_extract(record_json, '$.work.source.source_id'), '') AS source_id,
+                    COALESCE(json_extract(record_json, '$.work.start_offset'), 0) AS offset
+                FROM role_activities
+                WHERE owner_key = ? AND json_extract(record_json, '$.scope') = json(?)
+                    AND json_type(record_json, '$.work') = 'object'
+            ), cursor AS (
+                SELECT started, source_id, offset, activity_id FROM archive WHERE activity_id = ?
+            )
+            SELECT a.record_json FROM archive a LEFT JOIN cursor c ON 1 = 1
+            WHERE c.activity_id IS NULL OR a.started < c.started OR (
+                a.started = c.started AND (a.source_id, a.offset, a.activity_id)
+                    > (c.source_id, c.offset, c.activity_id))
+            ORDER BY a.started DESC, a.source_id, a.offset, a.activity_id LIMIT ?""",
+            (self._owner_key(owner), encode(scope), after_id, limit))
         return tuple(activity_from_json(row["record_json"]) for row in rows)
 
     def transition_activity(self, activity_id, *, owner, expected_revision, state,

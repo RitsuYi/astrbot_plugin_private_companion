@@ -33,6 +33,8 @@ _ALIASES = {
         "日期列表": "dates_list", "重要日期": "dates_list", "日期": "dates_list",
         "日期添加": "dates_add", "添加日期": "dates_add", "重要日期添加": "dates_add",
         "日期删除": "dates_remove", "删除日期": "dates_remove", "重要日期删除": "dates_remove",
+        "探索笔记": "exploration_notes", "研究笔记": "exploration_notes", "最近探索": "exploration_notes",
+        "探索目标": "exploration_notes",
         "日记": "timeline", "bot日记": "timeline", "小记": "timeline",
         "梦境": "timeline", "今日梦境": "timeline", "做了什么梦": "timeline",
         "梦境碎片": "timeline", "梦碎片": "timeline", "碎片梦境": "timeline",
@@ -48,7 +50,9 @@ _ALIASES = {
         "画像": "person", "关系": "person", "回复率": "manage_efficiency",
         "气氛": "person", "意图": "person", "关系状态": "person",
         "画图": "image_generate", "生图": "image_generate", "陪伴画图": "image_generate",
+        "自拍": "image_generate", "自拍一张": "image_generate",
         "合照": "image_edit", "陪伴合照": "image_edit",
+        "改图": "image_edit", "修图": "image_edit", "重绘": "image_edit", "p图": "image_edit",
         "图任务": "image_tasks", "陪伴图任务": "image_tasks",
         "表达学习": "manage_expression", "说话风格": "manage_expression", "口癖": "manage_expression",
         "昵称": "manage_relationship", "称呼": "manage_relationship", "语气": "manage_relationship",
@@ -74,8 +78,9 @@ _ALIASES = {
         "自拍参考图": "manage_image", "衣柜": "manage_image", "衣橱": "manage_image",
         "wardrobe": "manage_image", "角色衣柜": "manage_image", "服装库": "manage_image",
         "今日穿搭": "manage_image", "穿搭": "manage_image", "生成穿搭": "manage_image",
-        "刷新穿搭": "manage_image", "重置穿搭": "manage_image",
-        "生图api": "manage_image", "切换生图api": "manage_image", "交换生图api": "manage_image",
+        "刷新穿搭": "manage_image", "重置穿搭": "manage_image", "今日穿搭图": "manage_image",
+        "生图api": "manage_image", "查看生图api": "manage_image",
+        "切换生图api": "manage_image", "交换生图api": "manage_image",
         "发说说": "manage_native", "发qq空间": "manage_native", "发布说说": "manage_native",
         "qq空间链路测试": "manage_native", "配图测试": "manage_native",
         "新闻": "manage_native", "今日新闻": "manage_native",
@@ -105,6 +110,10 @@ _ALIASES = {
         "关掉": "manage_group", "关闭主链": "group_llm_block", "开启主链": "group_llm_release",
         "恢复主链": "group_llm_release", "撤回消息": "manage_group", "防撤回": "manage_group",
         "转述撤回": "manage_group", "撤回转述": "manage_group",
+        "开启生图": "group_image_enable", "打开生图": "group_image_enable",
+        "允许生图": "group_image_enable", "群生图开启": "group_image_enable",
+        "关闭生图": "group_image_disable", "关掉生图": "group_image_disable",
+        "禁止生图": "group_image_disable", "群生图关闭": "group_image_disable",
     },
 }
 
@@ -138,9 +147,10 @@ _HELP = (
     "长期记忆 <线索>、片段 <线索>、答疑 <问题>；待审建议用“陪伴 答疑确认 <编号>”或“陪伴 答疑取消 <编号>”；"
     "日记、梦境、画像；生成日程、刷新日程、重新生成日程；"
     "陪伴画图 <描述>、陪伴合照 <修改要求>；重要日期用 陪伴 日期列表、日期添加 <名称> <日期>、日期删除 <名称>；"
-    "日期列表也会列出每日反思自动记下的互动纪念日。\n"
+    "日期列表也会列出每日反思自动记下的互动纪念日；探索笔记用 陪伴 探索笔记 查看。\n"
     "语种：陪伴 切换语种 中文/日语/英语（只改当前私聊窗口）；群聊用 陪伴群 切换语种 日语。\n"
-    "群聊：陪伴群 状态、话题、黑话 <词>、片段 <线索>、LLM状态；关闭LLM / 开启LLM 需安装管理员。\n"
+    "群聊：陪伴群 状态、话题、黑话 <词>、片段 <线索>、LLM状态；关闭LLM / 开启LLM 需安装管理员；"
+    "生图权限用 陪伴群 开启生图 / 关闭生图，需安装管理员。\n"
     "查询依赖本轮实际授权工具；其他配置、权限、清理与重置请在陪伴小屋对应页面操作。"
 )
 
@@ -299,8 +309,10 @@ def command_instruction(command: FunctionalCommand | None) -> str:
     return text
 
 
-_EXECUTED_INTENTS = frozenset({"memory_clear", "dates_list", "dates_add", "dates_remove", "voice_language"})
-GROUP_CONTROL_INTENTS = frozenset({"group_llm_block", "group_llm_release", "group_llm_status"})
+_EXECUTED_INTENTS = frozenset({"memory_clear", "dates_list", "dates_add", "dates_remove",
+                               "voice_language", "exploration_notes"})
+GROUP_CONTROL_INTENTS = frozenset({"group_llm_block", "group_llm_release", "group_llm_status",
+                                   "group_image_enable", "group_image_disable"})
 _RECEIPT_EXTRA = "_companion_v2_functional_command_receipt"
 
 _FAILURE_TEXT = {
@@ -593,6 +605,29 @@ def _execute_voice_language(command, application, context):
     return text
 
 
+def _execute_exploration_notes(command, application, context):
+    if command.surface != "private":
+        return "未执行：探索笔记只在私聊里查看。"
+    schedule = getattr(application, "contact_schedule", None)
+    service = getattr(schedule, "exploration", None)
+    if service is None:
+        return "当前没有可用的探索服务。"
+    snapshot = service.read(context)
+    notes = snapshot.get("notes") or ()
+    if not notes:
+        last = snapshot.get("last_result") or "尚未运行"
+        return f"当前还没有研究笔记（最近状态：{last}）。"
+    lines = []
+    for note in notes[:5]:
+        label = " ".join(str(note.get("label") or "").split())[:40]
+        title = " ".join(str(note.get("title") or "").split())[:80]
+        source = " ".join(str(note.get("source") or "").split())[:32]
+        policy = {"private_note": "仅准备", "can_ask": "可自然询问", "can_share": "可分享"}.get(
+            note.get("share_policy"), "仅准备")
+        lines.append(f"{label}：{title}" + (f"（{source}）" if source else "") + f"·{policy}")
+    return "最近的研究笔记：" + "；".join(lines) + "。"
+
+
 def execute_functional_command(command: FunctionalCommand | None, *, application=None, context=None) -> str:
     """Run the few commands that must not depend on the model choosing a tool."""
     if command is None or command.intent not in _EXECUTED_INTENTS:
@@ -606,6 +641,8 @@ def execute_functional_command(command: FunctionalCommand | None, *, application
             return _execute_important_dates(command, application, context)
         if command.intent == "voice_language":
             return _execute_voice_language(command, application, context)
+        if command.intent == "exploration_notes":
+            return _execute_exploration_notes(command, application, context)
     except Exception as error:  # noqa: BLE001 - a receipt must never break the reply
         return f"未执行：程序处理该指令时出错（{type(error).__name__}）。"
     return ""

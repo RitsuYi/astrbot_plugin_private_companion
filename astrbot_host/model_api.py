@@ -524,7 +524,7 @@ class ModelWebAPI:
                         and ((set(data.get("changes") or {}) | set(data.get("reset") or []))
                              & set(CORE_MANAGED_FIELDS))):
                     raise TaskError("model_configuration_host_managed",
-                                    "普通回复模型由 AstrBot 当前会话管理；此处只保存对话附加提示。")
+                                    "普通回复模型由 AstrBot 当前会话管理；这里只保存对话附加提示和时段替换规则。")
             layer = data.get("layer", "role") if data is not None else request.query.get("layer", "role")
             # Capture the lifecycle-bound references under the control lock, but
             # never run synchronous SQLite/projection work on the event loop.
@@ -601,7 +601,7 @@ class ModelWebAPI:
                 self._authorized()
             async with self._balance_lock:
                 try:
-                    port = configured_balance_port(self.controller.config)
+                    port = configured_balance_port(self.controller.config, context=getattr(self.controller, "context", None))
                 except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
                     return self._response(Outcome.success({
                         "configured": True, "available": False, "provider": "unknown",
@@ -616,15 +616,16 @@ class ModelWebAPI:
                     }))
                 try:
                     observation = await asyncio.wait_for(port.fetch(), timeout=12)
-                except Exception:
+                except Exception as error:
+                    from .service_balance import balance_failure_data
                     data = {"configured": True, "available": False, "provider": port.provider,
                             "provider_label": port.provider_label, "currency_label": port.currency_label,
-                            "observed_at": None, "amount": None, "state": "unavailable"}
+                            "observed_at": None, "amount": None, **balance_failure_data(error)}
                 else:
+                    from .service_balance import balance_observation_data
                     data = {"configured": True, "available": True, "provider": port.provider,
-                            "provider_label": port.provider_label, "currency_label": port.currency_label,
-                            "observed_at": observation.observed_at.isoformat(),
-                            "amount": display_amount(observation.balance), "state": "available"}
+                            "provider_label": port.provider_label, "state": "available",
+                            **balance_observation_data(port, observation)}
                 return self._response(Outcome.success(data))
         except TaskError as error:
             return self._response(Outcome.failed(error.code, str(error)))
@@ -1689,6 +1690,18 @@ class ModelWebAPI:
                     result["host_registered"] = self._image_host_registered()
                 except Exception as error:
                     code = getattr(error, "code", "")
+                    if code == "native_endpoint_unconfigured":
+                        raise TaskError(
+                            "model_image_output_unconfigured",
+                            "no enabled image backend can run the requested operations",
+                        ) from error
+                    if code in {"configuration_store_unavailable", "configuration_save_failed"}:
+                        raise TaskError(
+                            "model_image_output_store_failed",
+                            "image backend settings could not be written to the data directory",
+                        ) from error
+                    if code not in {"configuration_conflict", "configuration_busy", "invalid_configuration"}:
+                        logger.exception("image output configuration save failed (code=%s)", code or "unexpected")
                     suffix = "conflict" if code == "configuration_conflict" else (
                         "busy" if code == "configuration_busy" else "invalid" if code == "invalid_configuration" else "failed")
                     raise TaskError("model_image_output_" + suffix, "image backend settings were not saved") from error

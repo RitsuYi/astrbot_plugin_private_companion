@@ -43,6 +43,20 @@ GAME_PLAY_INSTRUCTION = (
     "看对方反应再承认、装作无意或收手，不要把它说成一条醒目的特殊规则；有工具依据的变化必须反映在对局状态里。"
     "玩家要求公平时按普通操作执行。"
 )
+REALITY_DEVICE_INSTRUCTION = (
+    "用户明确要求开、关或调节米家设备时，把它当作待执行请求，直接调用本轮已开放的现实设备工具，"
+    "不要只说隔着屏幕够不到或让用户自己操作。"
+    "“帮我把空调关了”“把客厅灯打开”都是明确操作请求。"
+    "若用户只说类别（如“空调”）且精确别名未知，先调用本轮可用的 reality.device.list 对照；"
+    "唯一匹配时继续操作，多个候选时再简短询问。没有列表工具且无法从上下文确定唯一别名时，不猜设备。"
+    "电源开关优先用 reality.device.control，开、打开、启动对应 is_on=true，关、关闭、关机对应 is_on=false；"
+    "若本轮只开放 reality.device.action，则用 action=\"power\"，并以 value=\"on\" 或 value=\"off\" 表示开关。"
+    "温度、模式、亮度等设置及设备动作先用 reality.device.inspect 查看设备画像，"
+    "再严格按画像列出的可写属性或动作调用 reality.device.action，不猜测设备能力和值。"
+    "只响应用户当前明确要求的操作，不从闲聊、引用或旧消息推断授权。"
+    "只有拿到已确认回执后才说完成；失败、未确认或 unknown 均如实说明，unknown 不重放。"
+    "若本轮没有相应工具，说明当前能力或授权未开放，不要假装已控制，也不要把操作推回给用户。"
+)
 
 # 议程工具的参数字段说明。空 schema（{}）会让模型只能靠猜来构造对象/时间，
 # reminder.create 曾因此永远拿不到合法 schedule，最后静默退化成 memo.create。
@@ -128,17 +142,13 @@ def specification(action, required, optional=(), description="Use the original r
         properties["message"] = dict(_FIELD_SCHEMAS["message"])
         properties["memo_id"] = {"type": "string", "description": "已存在便签的 id；与 schedule/message 二选一，关联后按便签自身的时间触发"}
         properties["expected_memo_revision"] = {"type": "integer", "minimum": 1, "description": "关联便签时的版本号"}
+        description += (" For a new reminder, pass schedule and message together. "
+                        "To link an existing scheduled memo, pass memo_id and expected_memo_revision together. "
+                        "Use exactly one form; do not mix their fields.")
     schema = {
         "type": "object", "properties": properties,
         "required": sorted(required), "additionalProperties": False,
     }
-    if action == "reminder.create":
-        # 两种合法用法：直接给时间提醒，或关联一条已经有时间的便签。
-        # 不把 required 写死成其中一种，否则另一种调用会被 schema 直接拒绝。
-        schema["anyOf"] = [
-            {"required": ["schedule", "message"]},
-            {"required": ["memo_id", "expected_memo_revision"]},
-        ]
     return ToolSpec(action, description, encode(schema))
 
 
@@ -507,7 +517,12 @@ class LocalRoleTools:
     @staticmethod
     def _visible(row):
         if row["state"] in ("started", "unknown"):
-            return {"state": "unknown", "code": "original_tool_result_unknown", "effect": row["effect"]}
+            saved = json.loads(row["result_json"]) if row["result_json"] else None
+            if (isinstance(saved, dict) and saved.get("state") == "unknown"
+                    and saved.get("effect") == row["effect"]):
+                return saved
+            return {"state": "unknown", "code": "original_tool_result_unknown", "effect": row["effect"],
+                    "retry_disposition": "external_effect_unknown"}
         return json.loads(row["result_json"])
 
     def _validate_result(self, row, request, context, at):
@@ -623,6 +638,11 @@ class LocalRoleTools:
         if self.external is not None and any(
                 tool.action.startswith("game.") for tool in self.external.catalog_for(context)):
             instructions += "\n" + GAME_PLAY_INSTRUCTION
+        if self.external is not None:
+            offered_actions = {tool.action for tool in self.catalog_for(context)}
+            device_control_actions = {"reality.device.control", "reality.device.action"}
+            if offered_actions & device_control_actions:
+                instructions += "\n" + REALITY_DEVICE_INSTRUCTION
         if self.acquaintance.catalog_for(context):
             from companion_v2.memory.person.tools import INSTRUCTION as ACQUAINTANCE_INSTRUCTION
             instructions += "\n" + ACQUAINTANCE_INSTRUCTION

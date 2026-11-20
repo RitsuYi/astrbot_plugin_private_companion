@@ -8,6 +8,7 @@ import logging
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import AudienceRef, ReferenceValidationError, ScopeRef, SubjectKind, SubjectRef
 from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, AuthorizationTier, GrantState
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.personas import ConversationRoute, PersonaBinding, PersonaDirectory, SelectorKind
 from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.identity_policy.grants import PERSON_PERMISSION_GRANT_PREFIX
@@ -28,10 +29,12 @@ DELIVERY = "message.delivery"
 
 
 class MultiAuthority:
-    def __init__(self, runtime, settings, *, now, platform_name=None):
+    def __init__(self, runtime, settings, *, now, platform_name=None, private_session_lookup=None):
         self.runtime, self.settings, self.now = runtime, settings, now
         self.platform_name = platform_name
+        self.private_session_lookup = private_session_lookup
         self.identities, self.personas = PersistentIdentityDirectory(runtime), PersonaDirectory(runtime)
+        self.core_target_id = None
         # 私聊权限默认值的读取器；由会话在应用装配好之后挂上。没挂上时保持旧行为
         # （配置能力表里有的就签发），不让"没挂"变成"新用户全都没权限"。
         self.private_access = None
@@ -288,6 +291,12 @@ class MultiAuthority:
             raise TaskError("host_target_unavailable", "the native conversation route is unavailable")
 
     def _scope(self, target, scope, role):
+        session_id = target.participant_id
+        if callable(self.platform_name) and self.platform_name(target.platform_id) == "wechat_native":
+            session_id = (self.private_session_lookup(target.platform_id, target.account_id, target.participant_id)
+                          if callable(self.private_session_lookup) else None)
+            if not session_id:
+                raise TaskError("host_native_session_unavailable", "no authenticated private session is available")
         local_role = any(p.bot_id == target.bot_id and p.role_id == role.subject_id
                          for p in self.settings.personas)
         if not local_role:
@@ -298,12 +307,12 @@ class MultiAuthority:
                                  for p in self.settings.personas)
         if (scope.installation_id != self.runtime.installation_id or scope.kind.value != "private"
                 or (scope.platform, scope.account_id, scope.bot_id, scope.native_scope_id, scope.session_id)
-                != (target.platform_id, target.account_id, target.bot_id, target.participant_id, target.participant_id)
+                != (target.platform_id, target.account_id, target.bot_id, target.participant_id, session_id)
                 or role.installation_id != self.runtime.installation_id
                 or not local_role):
             raise TaskError("host_target_mismatch", "scope and role must come from this configured private target")
 
-    def provision_scope(self, target, scope, role):
+    def provision_scope(self, target, scope, role, *, core_admin=False):
         self._scope(target, scope, role)
         self.remember_target(target)
         actor = self.ensure_actor(target)
@@ -379,6 +388,8 @@ class MultiAuthority:
                         self.identities.issue_grant(grant_id=self.grant_id(scope, capability), subject=actor.subject,
                             scope=scope, capability=capability, tier=AuthorizationTier.STANDARD, valid_from=at,
                             expected_revision=self.identities.revision)
+            if core_admin:
+                self._grant_core_admin(context, scope)
             self._provision_context_grants(context)
             from companion_v2.identity_policy.legacy_import import apply_pending_private_authorization
             apply_pending_private_authorization(self.runtime, actor, scope, role.subject_id, self.now())
@@ -388,9 +399,34 @@ class MultiAuthority:
                 self.write(self.context_key(template, role.subject_id), scope.document())
             return context
 
+    def _grant_core_admin(self, context, scope):
+        """Keep the Dashboard-confirmed administrator window actually administrative.
+
+        A fresh install creates the bound QQ identity as a standard participant and
+        the proactive default is off.  Legacy migration restores the old owner's
+        core tier and contact grant, so the new-install path used to be weaker than
+        the upgrade path.  Only fill a missing tier/grant: an explicit downgrade or
+        revoke is a decision and must survive restarts.
+        """
+        policy = ObjectAccessPolicy(self.runtime)
+        tier = self.runtime.read_one(
+            "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
+            (context.actor.subject.kind.value, context.actor.subject.subject_id))
+        if tier is None:
+            policy.set_tier(context.actor.subject, AuthorizationTier.CORE,
+                expected_revision=policy.revision, observed_at=self.now())
+        capability = "proactive.contact"
+        if not any(grant.scope == scope and grant.capability == capability
+                   for grant in self.identities.grants_for_subject(context.actor.subject)):
+            self.identities.issue_grant(grant_id=self.grant_id(scope, capability),
+                subject=context.actor.subject, scope=scope, capability=capability,
+                tier=AuthorizationTier.STANDARD, valid_from=self.now(),
+                expected_revision=self.identities.revision)
+
     def select(self, target, scope, role):
         with self.runtime.transaction():
-            self.provision_scope(target, scope, role)
+            self.provision_scope(target, scope, role,
+                core_admin=target.target_id == self.core_target_id)
             key = "host.multi.active:" + target.target_id
             old = self.read(key)
             if old and old != scope.document():
@@ -405,8 +441,13 @@ class MultiAuthority:
             context = self.context(target.target_id, role.subject_id)
             from .image_access import ensure_image_access
             ensure_image_access(self.runtime, context, observed_at=self.now())
-            from companion_v2.role_work.state.configuration import ensure_window_presentation_grants
+            from companion_v2.role_work.state.configuration import (
+                ensure_window_presentation_grants, ensure_role_state_grants)
             ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
+            try:
+                ensure_role_state_grants(self.runtime, context, observed_at=self.now())
+            except Exception:
+                pass
             # Provisioning a missing tool grant advances the policy revision.
             # Life and proactive workers must bind the same fresh actor as intake.
             return replace(context, actor=self.actor(target))
@@ -494,12 +535,12 @@ class MultiAuthority:
         """正式版：不再需要投递授权，这里只回报"无需授权"。"""
         target = self.target(target_id)
         if isinstance(target, GroupTarget):
-            raise TaskError("host_group_authorization_required", "use the independent group delivery authorization")
+            raise TaskError("host_group_authorization_required", "group delivery no longer uses per-target authorization")
         return {"target_id": target_id, "authorized": True, "expires_at": None, "required": False}
 
     def revoke_delivery(self, target_id):
         if isinstance(self.target(target_id), GroupTarget):
-            raise TaskError("host_group_authorization_required", "use the independent group delivery revocation")
+            raise TaskError("host_group_authorization_required", "group delivery no longer uses per-target authorization")
         return {"target_id": target_id, "authorized": True, "required": False}
 
     def delivery_access(self, target):

@@ -130,6 +130,7 @@
   let bridge = null;
   let host = null;
   let status = null;
+  let runtimeStatusRead = false;
   let busy = false;
   let topologySelection = null;
   let topologyHover = null;
@@ -305,11 +306,16 @@
     const uniqueRole = new Map([...rolesByPersona].filter(([, ids]) => ids.size === 1)
       .map(([personaId, ids]) => [personaId, [...ids][0]]));
     const seen = new Set(rows.map(row => nativePersonaKey(row.bot_id, row.persona_id)));
+    const savedBots = Array.isArray(data?.accounts)
+      ? new Set(data.accounts.map(row => String(row.bot_id || ""))) : null;
     for (const target of data?.discovered?.targets || []) {
       if (target?.native !== true || target.details_available === false) continue;
       const personaId = String(target.persona_override || target.persona_id || "");
       const botId = String(target.bot_id || "");
       if (!personaId || !botId || !uniqueRole.has(personaId)) continue;
+      // Discovery is not consent to bind an account. Inherit personas only
+      // inside the saved account set, so refresh cannot restore removed bots.
+      if (savedBots && !savedBots.has(botId)) continue;
       const key = nativePersonaKey(botId, personaId);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1484,6 +1490,33 @@
     markBindingsDirty(account);
   }
 
+  function accountConnectionLabel(state) {
+    return ({ready: "客户端检查通过", platform_unavailable: "平台实例未加载",
+      client_unavailable: "适配器未提供可校验的客户端",
+      account_unavailable: "账号未通过连接校验", unknown: "连接状态未确认"})[state] || "连接状态未确认";
+  }
+  function accountMappingLabel(account) {
+    const saved = (bindingConfig?.accounts || []).some(row => bindingAccountKey(row) === bindingAccountKey(account))
+      && (bindingConfig?.personas || []).some(row => row.bot_id === account.bot_id);
+    return saved ? "已保存角色映射" : "仅发现账号 · 未保存角色映射";
+  }
+  async function bindingSaveError(error, selectedAccounts) {
+    const code = codeOf(error) || error?.message || "";
+    if (!["host_account_unavailable", "host_platform_unavailable"].includes(code)) return publicError(error);
+    // The host bridge may forward only the error code. Refresh read-only hints
+    // without replacing the editor or losing its unsaved selections.
+    try {
+      const current = await api("GET", accountApi);
+      const selected = new Set(selectedAccounts.map(bindingAccountKey));
+      const unavailable = (current?.discovered?.accounts || []).filter(row =>
+        selected.has(bindingAccountKey(row)) && ["platform_unavailable", "client_unavailable", "account_unavailable"]
+          .includes(row.connection_status));
+      if (unavailable.length) return unavailable.map(row =>
+        `${accountChoiceLabel(row)}：${accountConnectionLabel(row.connection_status)}`).join("；")
+        + "。本次角色映射未保存，页面选择仍为草稿。";
+    } catch { /* The original refusal remains authoritative if diagnostics fail. */ }
+    return `${publicError(error)} 本次角色映射未保存；请在插件日志中查找「账号校验未通过」确认具体账号。`;
+  }
   function accountBindingCard(account, mappings) {
     const card = document.createElement("section");
     card.className = "account-binding-card";
@@ -1495,7 +1528,9 @@
     const title = document.createElement("strong");
     title.textContent = accountChoiceLabel(account);
     const meta = document.createElement("small");
-    meta.textContent = `${platformLabel(account.platform_name || account.platform_id)} · Bot ${account.bot_id || "未标记"}`;
+    meta.textContent = `${platformLabel(account.platform_name || account.platform_id)} · Bot ${account.bot_id || "未标记"}`
+      + ` · ${accountMappingLabel(account)}`
+      + (account.connection_status ? ` · ${accountConnectionLabel(account.connection_status)}` : "");
     const add = document.createElement("button");
     add.type = "button";
     add.className = "button button-quiet";
@@ -1871,24 +1906,29 @@
       window.parent?.postMessage?.({channel: "companion-workspace", kind: "host-mappings-updated"}, "*");
       try { await readStatus(); }
       catch { notice("角色映射已保存；运行状态暂未读到，可重新读取。", "info"); return; }
+      const repaired = result.repaired_settings && Object.keys(result.repaired_settings).length
+        ? `已自动修复旧配置（${Object.entries(result.repaired_settings)
+          .map(([section, names]) => `${section}: ${names.join("、")}`).join("；")}）。`
+        : "";
       if (result.startup_error) {
         const modelPending = ["host_provider_required", "host_provider_unavailable"].includes(result.startup_error);
         const message = modelPending
           ? "角色映射已经保存。共享启动模型会自动跟随 AstrBot 当前模型；如无可用模型，请先在 AstrBot 模型配置中启用 Provider，再点「准备并启动」。"
           : `运行未启动：${failureMessage(result.startup_error)}`;
-        notice(`角色映射已保存。${message}`, modelPending ? "info" : "error");
+        notice(`${repaired}角色映射已保存。${message}`, modelPending ? "info" : "error");
         return;
       }
       if (result.requires_initialize) {
-        notice("角色映射已保存；点「准备并启动」完成角色准备。", "info");
+        notice(`${repaired}角色映射已保存；点「准备并启动」完成角色准备。`, "info");
         return;
       }
-      notice(result.started ? "角色映射已保存并自动加载。" : "角色映射已保存，运行状态已更新。", "success");
-    } catch (error) { notice(`保存未完成：${publicError(error)}`, "error"); }
+      notice(`${repaired}${result.started ? "角色映射已保存并自动加载。" : "角色映射已保存，运行状态已更新。"}`,
+        "success");
+    } catch (error) { notice(`保存未完成：${await bindingSaveError(error, accounts)}`, "error"); }
     finally { setBusy(false); updateBindingCheck(); }
   }
 
-  function renderStatus() {
+  function renderStatus({showNotice = true} = {}) {
     if (!status || !host) return;
     $("connection").textContent = "插件连接正常";
     $("connection").dataset.state = "ready";
@@ -1897,18 +1937,66 @@
     paintStatusValue("runtime-state", stateLabel(status.state || status.session_state || (status.configured ? "new" : "unloaded")));
     paintStatusValue("accepting", isAccepting() ? "正在运行" : "未运行");
     $("safety-note").textContent = isAccepting()
-      ? "已归入角色的人格自动处理其会话；主动消息按各窗口权限发送。"
+      ? "已接入账号下归入角色的人格自动处理其会话；主动消息按各窗口权限发送。"
       : hasSavedRoleMappings() ? "角色映射已保存；准备并启动后开始处理对应会话。"
         : "保存角色映射后，插件会自动准备并运行对应窗口。";
     $("safety-note").hidden = !$("safety-note").textContent;
-    if (status.last_failure?.code || status.settings_error) {
+    if (showNotice && (status.last_failure?.code || status.settings_error)) {
       const code = status.last_failure?.code || status.settings_error;
       const operation = status.last_failure?.code ? failureOperations[status.last_failure.operation] : "";
       notice((operation ? operation + "：" : "") + failureMessage(code), "error");
-    } else {
+    } else if (showNotice) {
       notice("");
     }
+    renderAccountConnections();
     updateControls();
+  }
+  function accountRuntimeReason(row) {
+    const reasons = {
+      host_platform_unavailable: "平台实例尚未加载，等待连接。",
+      host_account_unavailable: "账号客户端当前不可用，等待恢复。",
+      host_account_offline: "账号连接当前不可用，等待恢复。",
+      host_account_identity_unavailable: "连接已更换，当前适配器尚未提供可核验的账号身份，等待验证。",
+      host_account_changed: "实际 Bot 身份或账号映射发生变化，请核对账号配置。",
+      host_platform_changed: "平台类型或标识与已保存的配置不一致，请核对平台配置。",
+      host_account_identity_changed: "实际 Bot 身份与已保存的账号不一致，请核对账号配置。",
+      host_account_recovering: "正在重新接入账号并准备会话。",
+      host_platform_probe_failed: "暂时无法读取平台连接状态，将自动重试。",
+      host_account_recovery_failed: "账号连接已恢复，但会话准备失败；将自动重试，可查看 AstrBot 日志中的 CompanionV2 详情。",
+    };
+    const defaults = {
+      online: "客户端可用。",
+      waiting: "等待账号连接后自动接入。",
+      recovering: "正在重新接入账号并准备会话。",
+      identity_changed: "实际 Bot 身份发生变化，请核对账号配置。",
+      error: "账号接入未完成，请查看 AstrBot 日志中的 CompanionV2 详情。",
+    };
+    return reasons[row.reason_code] || labelFor(row.reason_code) || defaults[row.state] || "账号状态暂未确认。";
+  }
+  function renderAccountConnections() {
+    const root = $("account-runtime-list"), summary = $("account-runtime-summary");
+    if (!root || !summary) return;
+    const rows = status.account_connections;
+    if (!Array.isArray(rows)) {
+      summary.textContent = "账号状态暂未提供";
+      root.innerHTML = "";
+      return;
+    }
+    const names = {online: "已接入", waiting: "等待连接", recovering: "恢复中",
+      identity_changed: "账号身份变化", error: "接入异常"};
+    const online = rows.filter(row => row.state === "online").length;
+    summary.textContent = rows.length ? `${rows.length} 个已配置 · ${online} 个已接入` : "尚未配置 Bot 账号";
+    root.innerHTML = rows.map(row => {
+      const state = Object.hasOwn(names, row.state) ? row.state : "unknown";
+      const recovered = row.last_recovered_at ? new Date(row.last_recovered_at) : null;
+      const recoveredAt = recovered && !Number.isNaN(recovered.getTime())
+        ? `<p class="account-runtime-recovered">最近恢复：<time datetime="${escapeHTML(recovered.toISOString())}">${escapeHTML(recovered.toLocaleString())}</time></p>` : "";
+      return `<li class="account-runtime-card" data-state="${state}">
+        <div class="account-runtime-title"><strong>${escapeHTML(accountChoiceLabel(row))}</strong><span class="account-runtime-badge">${names[state] || "状态未确认"}</span></div>
+        <p class="account-runtime-meta">平台 ${escapeHTML(row.platform_id)} · Bot ${escapeHTML(row.bot_id)}</p>
+        <p class="account-runtime-reason">${escapeHTML(accountRuntimeReason(row))}</p>${recoveredAt}
+      </li>`;
+    }).join("");
   }
   function updateControls() {
     $("refresh").disabled = busy;
@@ -1962,8 +2050,37 @@
     }
     throw lastError || new Error("没有发现可用的 Companion V2 管理接口。");
   }
+  async function refreshRuntimeStatus() {
+    if (!host || busy || runtimeStatusRead || document.visibilityState === "hidden") return;
+    runtimeStatusRead = true;
+    try {
+      const value = await api("GET", `${host.prefix}/status`);
+      if (busy) return;
+      status = value;
+      renderStatus({showNotice: false});
+    } catch {
+      $("account-runtime-summary").textContent = "状态刷新失败，当前显示上次结果；可点击刷新状态重试";
+    } finally {
+      runtimeStatusRead = false;
+    }
+  }
   function publicError(error) {
-    if (labelFor(error?.code)) return labelFor(error.code);
+    const label = labelFor(error?.code);
+    const detail = messageOf(error);
+    const backendReason = typeof error?.reason === "string" ? error.reason : "";
+    if (label) {
+      if (error?.code === "staging_settings_invalid") {
+        const cause = backendReason || detail;
+        if (/segmentation/i.test(cause)) {
+          return `回复分段设置无效：${cause.replace(/^.*?segmentation settings are invalid:?\s*/i, "") || "请检查 segmentation"}。请在插件配置里修正后重试。`;
+        }
+        if (/voice/i.test(cause)) {
+          return `语音回复设置无效：${cause.replace(/^.*?voice reply settings are invalid:?\s*/i, "") || "请检查 voice_reply"}。请在插件配置里修正后重试。`;
+        }
+        return cause ? `${label}（${cause}）` : label;
+      }
+      return detail && detail !== label ? `${label}（${detail}）` : label;
+    }
     const message = messageOf(error) || error?.message || "";
     if (labelFor(message)) return labelFor(message);
     if (/dashboard|sign in|unauthorized|401/i.test(message)) return "请先登录 AstrBot Dashboard，再从插件页面打开本页。";
@@ -2071,8 +2188,14 @@
     }
   }
   boot();
+  setInterval(refreshRuntimeStatus, 10000);
+  document.addEventListener("visibilitychange", refreshRuntimeStatus);
+  window.addEventListener("focus", refreshRuntimeStatus);
+  /* Native session discovery walks AstrBot's platform/persona directories and
+     is much heavier than a status read. Refresh runtime state separately so
+     connection recovery remains visible while a mapping draft is being edited. */
   setInterval(() => {
     if (host && !busy && !bindingsDirty && !groupTargetsDirty
         && document.visibilityState !== "hidden" && !topologySelection) void readBindingConfig();
-  }, 15000);
+  }, 30000);
 })();

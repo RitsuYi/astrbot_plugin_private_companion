@@ -27,7 +27,7 @@ from companion_v2.adapters.astrbot.native import (
 )
 from companion_v2.adapters.astrbot.platform_sender import AstrBotPlatformSender
 from companion_v2.delivery.models import DeliveryEnvelope
-from companion_v2.execution.models import TaskContext, digest
+from companion_v2.execution.models import TaskContext, TaskError, digest
 from companion_v2.identity_policy.models import AuthenticatedHostPrincipal
 from companion_v2.identity_policy.personas import PersonaBinding, PersonaSelector, SelectorKind
 from tests.multi_host_support import MultiFixture, multi_config
@@ -169,9 +169,17 @@ class WeixinBridgeTests(WeixinFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.role, ROLE)
 
     async def test_replaced_registered_client_invalidates_the_bridge(self):
+        # 上游 7.2.6 的连接管理器把“客户端被替换”记录为新一代连接：已经签发的
+        # lease 必须失效，但重登后的新客户端应当可以继续接收下一条事件，而不是
+        # 让整个 bridge 永久失效（R2 在 7.1.8 用静态快照做到这一点，7.2.6 由
+        # NativeAccountConnections 的 generation 承担同样语义）。
+        stale = self.bridge.connections.acquire(self.account)
         self.native.platform.client = NS(token="synthetic-login-token")
-        result = await self.bridge.capture(event(self.native.platform))
-        self.assertFalse(result.is_success)
+        with self.assertRaises(TaskError) as raised:
+            self.bridge.connections.assert_current(stale)
+        self.assertEqual(raised.exception.code, "host_connection_changed")
+        captured = await self.capture()
+        self.assertIs(self.bridge.client(captured.route.scope), self.native.platform.client)
 
     async def test_missing_context_is_not_reported_delivered(self):
         delivery = await self.delivery()

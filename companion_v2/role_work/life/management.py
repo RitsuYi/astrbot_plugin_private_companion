@@ -28,6 +28,7 @@ class RoleLifeManagement:
         self.life = app.life_runtime.for_context(context)
         self.policy = ObjectAccessPolicy(self.runtime)
         self.operations = OperationRepository(self.runtime)
+        self.config_operations = OperationRepository(app.configuration.store)
         self.owner = RoleOwnerRef(context.scope.installation_id, context.scope.bot_id, context.role_binding.role.subject_id)
 
     def authorize(self, operator):
@@ -142,14 +143,23 @@ class RoleLifeManagement:
             target = codec.context(json.loads(row["context_json"]))
             if target.scope == self.context.scope:
                 journals.append(self._journal(target.key, operator, access))
-        activities, cursor = [], after_activity
-        while len(activities) < 30:
-            page = self.app.role_life.activities_for_role(self.owner, limit=30, after_id=cursor)
-            activities.extend(a for a in page if a.scope == self.context.scope and a.work)
-            if len(page) < 30:
-                cursor = None
-                break
-            cursor = page[-1].activity_id
+        archive = self.app.role_life.archive_activities(self.owner, self.context.scope,
+                                                       after_id=after_activity, limit=31)
+        activities = archive[:30]
+        cursor = activities[-1].activity_id if len(archive) > 30 else None
+        books = {}
+        sources = {a.work.source for a in activities if a.work.kind == "reading"}
+        if sources:
+            for activity in self._activities():
+                if activity.work.source in sources:
+                    progress = books.setdefault(activity.work.source, {"total": 0, "completed": 0})
+                    progress["total"] += 1
+                    if (activity.state is State.COMPLETED and activity.reading is not None
+                            and activity.reading.source == activity.work.source
+                            and activity.reading.content_hash == activity.work.content_hash
+                            and (activity.reading.start_offset, activity.reading.end_offset)
+                                == (activity.work.start_offset, activity.work.end_offset)):
+                        progress["completed"] += 1
         receipts = []
         for key, result in self.life.results.items():
             if result is None:
@@ -186,8 +196,10 @@ class RoleLifeManagement:
             "view_token": self.token(operator, access), "failure_code": self.life.failure_code,
             "next_diary_at": daily.next_at.isoformat() if daily else None,
             "next_sleep_at": sleep_schedule["next_sleep_at"], "sleep_schedule": sleep_schedule,
+            "next_reading_at": self.life.next_reading_at,
             "body_sleep": self.app.role_state.body_clock.read(self.context),
-            "activities": [self._project_activity(a, operator, access) for a in activities],
+            "activities": [{**self._project_activity(a, operator, access),
+                            "book_progress": books.get(a.work.source)} for a in activities],
             "next_activity": cursor, "journals": journals,
             "next_date": codec.context(json.loads(rows[-1]["context_json"])).key.local_date
                 if len({codec.context(json.loads(r["context_json"])).key.local_date for r in rows}) == 50 else None,
@@ -206,7 +218,9 @@ class RoleLifeManagement:
     def operation_id(self, prefix, operator, key):
         # Preserve pre-partitioning retries only in their original private scope.
         legacy = prefix + digest([operator.subject, key])
-        receipt = self.operations.get(legacy)
+        receipt = self.config_operations.get(legacy)
+        if not receipt.is_success:
+            receipt = self.operations.get(legacy)
         if prefix != "life-config-" and receipt.is_success and receipt.unwrap().operation.scope == self.context.scope:
             return legacy
         allowed_owners = (CONFIGURATION_OWNER,
@@ -221,7 +235,9 @@ class RoleLifeManagement:
         """Use a retired owner only to replay its exact persisted receipt."""
         owner = self.app.configuration._owners.get(CONFIGURATION_OWNER)
         legacy_ids = tuple(getattr(owner, "legacy_owner_ids", ()))
-        receipt = self.operations.get(operation_id)
+        receipt = self.config_operations.get(operation_id)
+        if not receipt.is_success:
+            receipt = self.operations.get(operation_id)
         if (receipt.is_success and receipt.unwrap().operation.scope == self.context.scope
                 and receipt.unwrap().operation.owner in legacy_ids):
             return receipt.unwrap().operation.owner
@@ -309,7 +325,7 @@ class RoleLifeManagement:
         source = SourceRef("book-" + digest(op_id), GROUP, self.context.scope, VersionRef(op_id, 1), now)
         require(self.app.role_journal.sources.publish(SourceRecord(source, self.context.audience, digest(text), text), observed_at=now))
         identifiers = []
-        # Every character belongs to one actual input span. No passage is silently omitted.
+        # Every nonblank passage is represented by an exact original span.
         for start in range(0, len(text), 6000):
             end = min(start + 6000, len(text))
             if not text[start:end].strip():
@@ -406,6 +422,36 @@ class RoleLifeManagement:
                             self.app.role_life.transition_activity(identifier, owner=self.owner, expected_revision=revision,
                                 state=State.CANCELLED, operation_id=op_id + ":cancel", observed_at=self.app.now())
                     self.app.life_runtime.cancel_activity(identifier)
+                elif action == "remove":
+                    a = self._activity(identifier, current=False)
+                    if a.revision != revision:
+                        raise TaskError("life_revision_conflict", "activity changed")
+                    if a.work.kind != "reading" or a.state not in (State.COMPLETED, State.CANCELLED):
+                        raise TaskError("life_activity_not_removable",
+                                        "only completed or cancelled reading records can be removed")
+                    source = a.work.source
+                    if source is not None:
+                        row = self.runtime.read_one("SELECT governance_revision FROM sources WHERE source_id = ?",
+                                                    (source.source_id,))
+                        if row is not None:
+                            try:
+                                self.app.role_journal.sources.revoke(
+                                    source, expected_governance_revision=row["governance_revision"],
+                                    observed_at=self.app.now())
+                            except TaskError:
+                                # An already-revoked original still lets the test card go.
+                                pass
+                        for related in self._activities():
+                            if (related.activity_id != identifier and related.work.source == source
+                                    and related.state not in (State.COMPLETED, State.CANCELLED)):
+                                self.app.role_life.transition_activity(
+                                    related.activity_id, owner=self.owner, expected_revision=related.revision,
+                                    state=State.CANCELLED,
+                                    operation_id=op_id + ":" + digest(related.activity_id),
+                                    observed_at=self.app.now())
+                                self.app.life_runtime.cancel_activity(related.activity_id)
+                    self.app.role_life.delete_activity(identifier, owner=self.owner)
+                    result = {"removed": identifier}
                 elif action in ("edit", "delete", "restore"):
                     old = self._journal(journal_target.key, operator, access)
                     if old is None or old["revision"] != revision:
@@ -431,5 +477,8 @@ class RoleLifeManagement:
             return Outcome.success({"operation_id": op_id, **result})
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
-        except (KeyError, ValueError, TypeError):
-            return Outcome.failed("life_command_invalid", "invalid command or stale activity revision; refresh and check the selected record")
+        except (KeyError, ValueError, TypeError) as error:
+            return Outcome.failed(
+                "life_command_invalid",
+                f"invalid command or stale activity revision; refresh and check the selected record "
+                f"({type(error).__name__}: {error})")

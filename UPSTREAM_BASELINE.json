@@ -2,11 +2,11 @@
   "repository": "RitsuYi/astrbot_plugin_private_companion",
   "branch": "weixin",
   "upstream_repository": "menglimi/astrbot_plugin_private_companion",
-  "upstream_base_commit": "7e602dac2d8f9c310bf0e23de55d9c93f029aad1",
-  "adapted_version": "7.1.8+weixin.2",
+  "upstream_base_commit": "2436eea3a8c97b177d38466a7657631e6a020e68",
+  "adapted_version": "7.2.6+weixin.2",
   "merge_strategy": "git-merge-with-shared-upstream-baseline",
   "automatic_upstream_merge": false,
-  "real_wechat_verification": "用户于 2026-11-09 反馈安装后已验证可用；维护方未直接操作真实微信账号，具体登录、收发、主动联系和双插件联调覆盖未逐项记录。",
+  "real_wechat_verification": "7.1.8+weixin.2 于 2026-11-09 由用户反馈安装后可用；维护方未直接操作真实微信账号。7.2.6+weixin.2 仅用 AstrBot 4.29.4 SDK 与合成身份验证，真实微信登录、收发与主动消息未实测。",
   "upstream_history_bridge_commit": "d54479875e51fecc4e4e1e7ec6ab853efc4af819",
   "upstream_git_history_connected": true,
   "handoff": {
@@ -19,32 +19,30 @@
     "verified_on": "2026-11-09"
   },
   "previous_release": {
-    "source_archive": "astrbot_plugin_private_companion-7.1.6-weixin-r2.zip",
-    "source_archive_sha256": "c63b14f6031ab2818b7712e7103274b040602764a6999840aa7c83f446e0ce53",
-    "source_snapshot_commit": "d18d3b651df41a3e5cef2643e0691c4cff61f4eb",
-    "source_archive_verification": "SHA256 recorded from the verified handoff manifest; original plugin ZIP is not present locally.",
-    "adapted_version": "7.1.6+weixin.2",
-    "upstream_base_commit": "05a7689aad72c0de5c84c13b934d32344f21c091"
+    "source_archive": "astrbot_plugin_private_companion-7.1.8+weixin.2-plugin-only.zip",
+    "source_archive_sha256": "ee9c7a715ab296c1e2d9d768b86ca93ced5caf439c13d385ffca1a3124cef0f2",
+    "source_snapshot_commit": "3fd2c666192fa73c930502abb1fa8e56db27e5e6",
+    "release_branch_commit": "08da555bc53e582fbb0447bdb6c60b09421315b7",
+    "source_archive_verification": "SHA256 recorded from the verified 7.1.8 delivery manifest; the ZIP is retained outside the repository in the maintenance workstation delivery directory.",
+    "adapted_version": "7.1.8+weixin.2",
+    "upstream_base_commit": "7e602dac2d8f9c310bf0e23de55d9c93f029aad1"
   },
-  "upgrade": {
-    "from_version": "7.1.6+weixin.2",
-    "target_version": "7.1.8",
-    "target_commit": "7e602dac2d8f9c310bf0e23de55d9c93f029aad1",
-    "method": "normal-three-way-merge",
-    "excludes_7_1_9": true,
-    "release_artifact_hash_location": "docs/WEIXIN_OC_7_1_8_VALIDATION.md and external release-manifest.json",
-    "real_wechat_tested": false,
-    "user_validation": {
-      "date": "2026-11-09",
-      "status": "reported_working",
-      "agent_observed": false,
-      "individual_acceptance_checks_recorded": false
-    },
-    "delivered_archive": {
-      "filename": "astrbot_plugin_private_companion-7.1.8+weixin.2-plugin-only.zip",
-      "sha256": "ee9c7a715ab296c1e2d9d768b86ca93ced5caf439c13d385ffca1a3124cef0f2",
-      "runtime_source_commit": "3fd2c666192fa73c930502abb1fa8e56db27e5e6",
-      "unchanged_during_github_sync": true
+  "earlier_releases": [
+    {
+      "source_archive": "astrbot_plugin_private_companion-7.1.6-weixin-r2.zip",
+      "source_archive_sha256": "c63b14f6031ab2818b7712e7103274b040602764a6999840aa7c83f446e0ce53",
+      "source_snapshot_commit": "d18d3b651df41a3e5cef2643e0691c4cff61f4eb",
+      "source_archive_verification": "SHA256 recorded from the verified handoff manifest; original plugin ZIP is not present locally.",
+      "adapted_version": "7.1.6+weixin.2",
+      "upstream_base_commit": "05a7689aad72c0de5c84c13b934d32344f21c091"
     }
+  ],
+  "upgrade": {
+    "from_version": "7.1.8+weixin.2",
+    "target_version": "7.2.6",
+    "target_commit": "2436eea3a8c97b177d38466a7657631e6a020e68",
+    "method": "normal-three-way-merge",
+    "release_artifact_hash_location": "docs/WEIXIN_OC_7_2_6_VALIDATION.md and external release-manifest.json",
+    "real_wechat_tested": false
   }
 }
