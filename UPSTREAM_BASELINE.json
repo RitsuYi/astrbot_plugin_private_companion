@@ -43,6 +43,13 @@
     "target_commit": "2436eea3a8c97b177d38466a7657631e6a020e68",
     "method": "normal-three-way-merge",
     "release_artifact_hash_location": "docs/WEIXIN_OC_7_2_6_VALIDATION.md and external release-manifest.json",
-    "real_wechat_tested": false
+    "real_wechat_tested": false,
+    "delivered_archive": {
+      "filename": "astrbot_plugin_private_companion-7.2.6+weixin.2-plugin-only.zip",
+      "sha256": "076073308e5516914b145654c473f3cbee0a0d78a0e22477f2b4bbf1715e7948",
+      "bytes": 11545225,
+      "files": 1346,
+      "runtime_source_commit": "cc6f7d501634bd53b30e6bb40e990a26e8f5d861"
+    }
   }
 }
