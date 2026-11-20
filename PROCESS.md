@@ -112,6 +112,8 @@ git diff --check
 ```
 
 - 在独立虚拟环境安装已核验的 AstrBot SDK 后运行测试；插件运行依赖不得声明 `astrbot`。
+- 直接从仓库根运行 `unittest` 时，AstrBot 会在当前目录生成 `data/`（含默认 dashboard 配置）。
+  先把 `ASTRBOT_ROOT` 指向隔离目录，或使用交付目录的 `validate_upgrade.py`；生成的 `data/` 不得提交。
 - 与变更面相关的额外回归（绑定、私聊路由、主动消息、记忆隔离、双插件桥接）必须实际执行并记录。
 - 网络与微信登录用模拟/合成身份；测试数据放隔离目录，不做批量清理。
 
