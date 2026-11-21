@@ -2,9 +2,9 @@
 
 ## 范围与分支
 
-本仓库为 `RitsuYi/astrbot_plugin_private_companion` 的微信适配版 `7.2.6+weixin.2`。唯一发布分支 `weixin`。
+本仓库为 `RitsuYi/astrbot_plugin_private_companion` 的微信适配版 `7.2.7+weixin.2`。唯一发布分支 `weixin`。
 `origin=https://github.com/RitsuYi/astrbot_plugin_private_companion.git`；`upstream=https://github.com/menglimi/astrbot_plugin_private_companion.git`。
-当前锁定作者基线 `2436eea3a8c97b177d38466a7657631e6a020e68`（v7.2.6）。来源及包哈希见 `UPSTREAM_BASELINE.json`，完整流程见 `MAINTENANCE.md`，一次升级的固定步骤见 `PROCESS.md`。
+当前锁定作者基线 `c0acd88adecc34a6637de00e4ff7f234e2ed5ac0`（v7.2.7）。来源及包哈希见 `UPSTREAM_BASELINE.json`，完整流程见 `MAINTENANCE.md`，一次升级的固定步骤见 `PROCESS.md`。
 上游 7.2.6 已原生支持 `weixin_oc`（使用 `weixin-user:` subject 命名空间）；本维护版必须保留 R2 适配的
 `weixin-oc-user:` 命名空间与 `platform.client` 直读语义，改回上游命名空间会让已有绑定、人格和记忆失去归属。
 先检查工作区、Git 状态和实际远端，保留用户文件与提交。不得创建作者原版 main 发布分支、强推、重建仓库，
@@ -22,8 +22,8 @@ Python/JSON 语法可在仓库根目录使用只读检查（不产生 `__pycache
 ```powershell
 python -B -X utf8 -c "import ast,pathlib; paths=list(pathlib.Path('.').rglob('*.py')); [ast.parse(p.read_bytes(),filename=str(p)) for p in paths if '.git' not in p.parts]"
 python -B -X utf8 -c "import json,pathlib; [json.loads(p.read_bytes()) for p in pathlib.Path('.').rglob('*.json') if '.git' not in p.parts]"
-git merge-base --is-ancestor 2436eea3a8c97b177d38466a7657631e6a020e68 HEAD
-git merge-base HEAD 2436eea3a8c97b177d38466a7657631e6a020e68
+git merge-base --is-ancestor c0acd88adecc34a6637de00e4ff7f234e2ed5ac0 HEAD
+git merge-base HEAD c0acd88adecc34a6637de00e4ff7f234e2ed5ac0
 git diff --check
 ```
 

@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_ID = "astrbot_plugin_private_companion"
-VERSION = "7.2.6+weixin.2"
+VERSION = "7.2.7+weixin.2"
 RELEASE_SCHEMA = "companion.v2.release.v2"
 MARKET_MAX_BYTES = 16_000_000
 NATIVE_EXTENSION_FILES = {
@@ -205,10 +205,10 @@ def verify_native_baseline(version, hashes, baseline):
 
 
 def release_version_key(version):
-    """Order letter hotfixes and the experimental WeChat local revision."""
+    """Order the repository's letter hotfixes after their numeric release."""
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)([a-z]?)(?:\+weixin\.(\d+))?", version)
     if not match:
-        raise ValueError("native capability baseline requires major.minor.patch with an optional letter or +weixin.N revision")
+        raise ValueError("native capability baseline requires major.minor.patch with an optional letter revision")
     return (*map(int, match.groups()[:3]), match.group(4), int(match.group(5) or 0))
 
 
